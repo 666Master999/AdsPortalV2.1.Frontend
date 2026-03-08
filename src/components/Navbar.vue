@@ -12,20 +12,14 @@ function handleLogout() {
 </script>
 
 <template>
-  <nav class="navbar navbar-expand-lg navbar-dark bg-dark mb-4">
+  <nav class="navbar navbar-expand-lg navbar-light bg-white shadow-sm mb-4">
     <div class="container">
-      <router-link class="navbar-brand" to="/">AdsPortal</router-link>
+      <router-link class="navbar-brand fw-bold" to="/">AdsPortal V2</router-link>
       <button class="navbar-toggler" data-bs-toggle="collapse" data-bs-target="#navbarNav">
         <span class="navbar-toggler-icon"></span>
       </button>
       <div class="collapse navbar-collapse" id="navbarNav">
         <ul class="navbar-nav me-auto">
-          <li class="nav-item">
-            <router-link class="nav-link" to="/">Главная</router-link>
-          </li>
-          <li class="nav-item">
-            <router-link class="nav-link" to="/ads">Объявления</router-link>
-          </li>
           <li class="nav-item" v-if="userStore.token">
             <router-link class="nav-link" to="/ads/create">Создать</router-link>
           </li>
@@ -36,24 +30,18 @@ function handleLogout() {
             <router-link class="nav-link" to="/admin">Админ</router-link>
           </li>
         </ul>
-        <ul class="navbar-nav">
+        <div class="d-flex align-items-center">
           <template v-if="userStore.token">
-            <li class="nav-item">
-              <router-link class="nav-link" to="/profile">Профиль</router-link>
-            </li>
-            <li class="nav-item">
-              <button class="btn btn-outline-light btn-sm ms-2" @click="handleLogout">Выйти</button>
-            </li>
+            <router-link class="nav-link me-2" :to="`/profile/${userStore.user.userId}`">
+              {{ userStore.user.userName || userStore.user.userLogin }}
+            </router-link>
+            <button class="btn btn-danger btn-sm" @click="handleLogout">Выйти</button>
           </template>
           <template v-else>
-            <li class="nav-item">
-              <router-link class="nav-link" to="/login">Войти</router-link>
-            </li>
-            <li class="nav-item">
-              <router-link class="nav-link" to="/register">Регистрация</router-link>
-            </li>
+            <router-link class="btn btn-outline-primary me-2" to="/login">Войти</router-link>
+            <router-link class="btn btn-primary" to="/register">Регистрация</router-link>
           </template>
-        </ul>
+        </div>
       </div>
     </div>
   </nav>

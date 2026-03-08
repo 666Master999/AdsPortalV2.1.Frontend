@@ -5,57 +5,98 @@ export const useUserStore = defineStore('user', () => {
   const user = ref(JSON.parse(localStorage.getItem('user') || 'null'))
   const token = ref(localStorage.getItem('token') || '')
   const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5122').replace(/\/$/, '')
-  const authBase = `${apiBase}/auth`
+  const usersBase = `${apiBase}/users`
 
-  function saveAuth(data) {
-    token.value = data.token
-    user.value = {
-      userId: data.userId,
-      userLogin: data.userLogin,
-      userName: data.userName,
-      avatar: data.avatar,
-    }
-    localStorage.setItem('token', data.token)
+  function saveAuth({ token: t, userId, userLogin, userName, avatar }) {
+    token.value = t
+    user.value = { userId, userLogin, userName, avatar }
+    localStorage.setItem('token', t)
     localStorage.setItem('user', JSON.stringify(user.value))
   }
 
   async function auth(endpoint, userLogin, userPassword) {
-    let response
+    const opts = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ userLogin, userPassword }),
+    }
+    let res
     try {
-      response = await fetch(`${authBase}/${endpoint}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userLogin, userPassword }),
-      })
-    } catch {
-      throw new Error('Сервер недоступен. Проверьте, запущен ли бэкенд.')
+      res = await fetch(`${apiBase}/auth/${endpoint}`, opts)
+    } catch (_) {
+      throw new Error('Сервер недоступен.')
     }
+    if (!res.ok) throw new Error((await res.text()) || 'Ошибка запроса')
+    saveAuth((await res.json()).data)
+  }
 
-    if (!response.ok) {
-      throw new Error((await response.text()) || 'Ошибка запроса')
+  const login = (l, p) => auth('login', l, p)
+  const register = (l, p) => auth('register', l, p)
+  const logout = () => { user.value = null; token.value = ''; localStorage.removeItem('user'); localStorage.removeItem('token') }
+
+  function getAuthHeader() {
+    return token.value ? { Authorization: `Bearer ${token.value}` } : {}
+  }
+
+  async function fetchProfile(id) {
+    const hdrs = getAuthHeader()
+    const res = await fetch(`${usersBase}/${id}`, { headers: hdrs })
+    if (!res.ok) throw new Error('Failed to load profile')
+    return res.json()
+  }
+
+  // uploadAvatar sends FormData with field 'avatar'
+  async function uploadAvatar(id, file) {
+    if (!file) throw new Error('No file provided')
+    const form = new FormData()
+    form.append('avatar', file)
+
+    const resp = await fetch(`${usersBase}/${id}/upload-avatar`, {
+      method: 'POST',
+      headers: {
+        ...getAuthHeader()
+        // DO NOT set Content-Type here
+      },
+      body: form
+    })
+
+    const json = await resp.json()
+    if (!resp.ok) throw new Error(json?.message || json || `Upload failed (${resp.status})`)
+    return json
+  }
+
+  // updateProfile PATCH JSON; returns normalized object
+  async function updateProfile(id, data) {
+    const res = await fetch(`${usersBase}/${id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
+      body: JSON.stringify(data),
+    })
+    const json = await res.json()
+    if (!res.ok) throw new Error(json?.message || json || 'Failed to update profile')
+
+    // merge local user so that store stays в sync with what we sent (only non-sensitive fields)
+    user.value = { ...user.value, ...data }
+    localStorage.setItem('user', JSON.stringify(user.value))
+
+    // normalize return: raw server response, arrays if present, and user object fallback
+    return {
+      raw: json,
+      updated: json?.updated ?? null,
+      skipped: json?.skipped ?? null,
+      user: json?.user ?? json
     }
-
-    saveAuth(await response.json())
   }
 
-  async function login(userLogin, userPassword) {
-    await auth('login', userLogin, userPassword)
+  return {
+    user,
+    token,
+    login,
+    register,
+    logout,
+    fetchProfile,
+    uploadAvatar,
+    updateProfile,
+    saveAuth
   }
-
-  async function register(userLogin, userPassword) {
-    await auth('register', userLogin, userPassword)
-  }
-
-  function logout() {
-    user.value = null
-    token.value = ''
-    localStorage.removeItem('user')
-    localStorage.removeItem('token')
-  }
-
-  function loadProfile() {
-    user.value = token.value ? JSON.parse(localStorage.getItem('user') || 'null') : null
-  }
-
-  return { user, token, login, register, logout, loadProfile }
 })
