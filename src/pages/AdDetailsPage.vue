@@ -146,7 +146,25 @@ onMounted(async () => {
     await adsStore.loadAd(route.params.id)
   } catch (e) {
     // Если объявление недоступно (удалено/нет доступа/не найдено) — показываем сообщение.
-    const serverMsg = e?.message ? String(e.message).trim() : ''
+    let serverMsg = ''
+
+    if (e?.message) {
+      serverMsg = String(e.message).trim()
+    } else if (typeof e === 'string') {
+      serverMsg = e.trim()
+    } else {
+      serverMsg = String(e ?? '').trim()
+    }
+
+    if (serverMsg.startsWith('{')) {
+      try {
+        const parsed = JSON.parse(serverMsg)
+        serverMsg = (parsed?.message || parsed?.error || '').toString().trim()
+      } catch {
+        // оставим как есть
+      }
+    }
+
     loadError.value = serverMsg
       ? `Объявление недоступно: ${serverMsg}`
       : 'Объявление недоступно или не существует.'
