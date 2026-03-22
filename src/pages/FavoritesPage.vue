@@ -2,11 +2,12 @@
 import { ref, onMounted } from 'vue'
 import AdCard from '../components/AdCard.vue'
 
+const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5122').replace(/\/$/, '')
 const favorites = ref([])
 
 onMounted(async () => {
   const token = localStorage.getItem('token')
-  const response = await fetch('/api/favorites', {
+  const response = await fetch(`${apiBase}/favorites`, {
     headers: { Authorization: `Bearer ${token}` },
   })
   favorites.value = await response.json()

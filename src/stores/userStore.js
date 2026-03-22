@@ -1,5 +1,16 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, computed } from 'vue'
+
+function parseJwt(token) {
+  if (!token) return null
+  try {
+    const payload = token.split('.')[1]
+    const decoded = atob(payload.replace(/-/g, '+').replace(/_/g, '/'))
+    return JSON.parse(decoded)
+  } catch {
+    return null
+  }
+}
 
 export const useUserStore = defineStore('user', () => {
   const user = ref(JSON.parse(localStorage.getItem('user') || 'null'))
@@ -7,9 +18,14 @@ export const useUserStore = defineStore('user', () => {
   const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5122').replace(/\/$/, '')
   const usersBase = `${apiBase}/users`
 
-  function saveAuth({ token: t, userId, userLogin, userName, avatar }) {
+  const jwtPayload = computed(() => parseJwt(token.value))
+  const tokenUserId = computed(() => jwtPayload.value?.sub || jwtPayload.value?.id || jwtPayload.value?.userId)
+  const isAdmin = computed(() => Boolean(user.value?.isAdmin))
+
+  function saveAuth(data) {
+    const { token: t, ...rest } = data || {}
     token.value = t
-    user.value = { userId, userLogin, userName, avatar }
+    user.value = rest || null
     localStorage.setItem('token', t)
     localStorage.setItem('user', JSON.stringify(user.value))
   }
@@ -27,7 +43,18 @@ export const useUserStore = defineStore('user', () => {
       throw new Error('Сервер недоступен.')
     }
     if (!res.ok) throw new Error((await res.text()) || 'Ошибка запроса')
-    saveAuth((await res.json()).data)
+
+    const data = (await res.json()).data
+    saveAuth(data)
+
+    // Ensure we have the latest user info (включая IsAdmin) from API
+    try {
+      const profile = await fetchProfile(tokenUserId.value)
+      user.value = { ...user.value, ...profile }
+      localStorage.setItem('user', JSON.stringify(user.value))
+    } catch {
+      // ignore – права проверяются на сервере, главное, что мы залогинены
+    }
   }
 
   const login = (l, p) => auth('login', l, p)
@@ -43,6 +70,17 @@ export const useUserStore = defineStore('user', () => {
     const res = await fetch(`${usersBase}/${id}`, { headers: hdrs })
     if (!res.ok) throw new Error('Failed to load profile')
     return res.json()
+  }
+
+  async function refreshUser() {
+    if (!token.value || !tokenUserId.value) return
+    try {
+      const profile = await fetchProfile(tokenUserId.value)
+      user.value = { ...user.value, ...profile }
+      localStorage.setItem('user', JSON.stringify(user.value))
+    } catch {
+      // ignore - user can still use the app without admin flag until next successful fetch
+    }
   }
 
   // uploadAvatar sends FormData with field 'avatar'
@@ -91,10 +129,13 @@ export const useUserStore = defineStore('user', () => {
   return {
     user,
     token,
+    tokenUserId,
+    isAdmin,
     login,
     register,
     logout,
     fetchProfile,
+    refreshUser,
     uploadAvatar,
     updateProfile,
     saveAuth

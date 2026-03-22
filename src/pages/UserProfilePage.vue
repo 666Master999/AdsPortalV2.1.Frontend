@@ -7,6 +7,21 @@ const userStore = useUserStore()
 const route = useRoute()
 const router = useRouter()
 
+function formatModerationStatus(status) {
+  switch (status) {
+    case 'Pending':
+      return 'На модерации'
+    case 'Approved':
+      return 'Одобрено'
+    case 'Rejected':
+      return 'Отклонено'
+    case 'Hidden':
+      return 'Скрыто'
+    default:
+      return status || ''
+  }
+}
+
 const error = ref('')
 const profile = ref(null)
 const patchInfo = ref(null)
@@ -108,6 +123,11 @@ function resolveUrl(path) {
           <div class="card">
             <div class="card-body">
               <h5 class="card-title">{{ ad.title }}</h5>
+              <p v-if="ad.moderationStatus || ad.status" class="mb-1">
+                <span class="badge bg-secondary">
+                  {{ formatModerationStatus(ad.moderationStatus ?? ad.status) }}
+                </span>
+              </p>
               <p class="card-text">
                 {{ ad.description ? (ad.description.length > 100 ? ad.description.substring(0, 100) + '...' : ad.description) : '' }}
               </p>

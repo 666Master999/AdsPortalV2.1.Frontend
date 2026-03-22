@@ -1,9 +1,14 @@
 <script setup>
+import { onMounted } from 'vue'
 import { useUserStore } from '../stores/userStore'
 import { useRouter } from 'vue-router'
 
 const userStore = useUserStore()
 const router = useRouter()
+
+onMounted(() => {
+  userStore.refreshUser()
+})
 
 function handleLogout() {
   userStore.logout()
@@ -26,8 +31,21 @@ function handleLogout() {
           <li class="nav-item" v-if="userStore.token">
             <router-link class="nav-link" to="/favorites">Избранное</router-link>
           </li>
-          <li class="nav-item" v-if="userStore.user?.role === 'admin'">
-            <router-link class="nav-link" to="/admin">Админ</router-link>
+          <li class="nav-item dropdown" v-if="userStore.isAdmin">
+            <a class="nav-link dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
+              Админ
+            </a>
+            <ul class="dropdown-menu">
+              <li>
+                <router-link class="dropdown-item" to="/admin?tab=ads">Объявления</router-link>
+              </li>
+              <li>
+                <router-link class="dropdown-item" to="/admin?tab=users">Пользователи</router-link>
+              </li>
+              <li>
+                <router-link class="dropdown-item" to="/admin?tab=complaints">Жалобы</router-link>
+              </li>
+            </ul>
           </li>
         </ul>
         <div class="d-flex align-items-center">
