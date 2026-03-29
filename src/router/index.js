@@ -1,4 +1,4 @@
-import { createRouter, createWebHistory } from 'vue-router'
+import { createRouter, createWebHashHistory } from 'vue-router'
 
 import HomePage from '../pages/HomePage.vue'
 import LoginPage from '../pages/LoginPage.vue'
@@ -23,12 +23,14 @@ const routes = [
   { path: '/ads/:id', component: AdDetailsPage },
   { path: '/category/:id', component: HomePage },
   { path: '/favorites', component: FavoritesPage },
-  { path: '/chat/:adId', component: ChatPage },
+  { path: '/chat', component: ChatPage },
+  { path: '/chat/:conversationId', component: ChatPage },
+  { path: '/chat/ad/:adId', component: ChatPage },
   { path: '/admin', component: AdminDashboardPage },
 ]
 
 const router = createRouter({
-  history: createWebHistory(),
+  history: createWebHashHistory(),
   routes,
 })
 

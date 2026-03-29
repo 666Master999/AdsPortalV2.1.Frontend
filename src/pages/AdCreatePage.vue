@@ -15,6 +15,7 @@
     const title = ref('')
     const description = ref('')
     const price = ref('')
+    const isNegotiable = ref(false)
     const categoryId = ref('')
     const city = ref('')
     const type = ref('')
@@ -139,7 +140,12 @@
             const form = new FormData()
             form.append('title', title.value)
             form.append('description', description.value)
-            form.append('price', price.value)
+            if (isNegotiable.value) {
+                form.append('isNegotiable', 'true')
+            }
+            if (price.value !== '' && price.value != null) {
+                form.append('price', price.value)
+            }
             form.append('categoryId', categoryId.value)
             form.append('city', city.value)
             form.append('type', type.value)
@@ -230,6 +236,10 @@
                         <div class="col-md-6">
                             <label class="form-label">Цена (бел. руб.)</label>
                             <input v-model="price" type="number" class="form-control" />
+                            <div class="form-check mt-2">
+                                <input class="form-check-input" type="checkbox" v-model="isNegotiable" id="negotiableCheckbox" />
+                                <label class="form-check-label" for="negotiableCheckbox">Договорная цена</label>
+                            </div>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Категория *</label>

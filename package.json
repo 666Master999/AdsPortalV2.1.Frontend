@@ -9,6 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@microsoft/signalr": "^10.0.0",
     "bootstrap": "^5.3.8",
     "pinia": "^3.0.4",
     "sortablejs": "^1.15.7",

@@ -1,10 +1,11 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
+import { getApiBaseUrl } from '../config/apiBase'
 
 export const useAdsStore = defineStore('ads', () => {
   const ads = ref([])
   const selectedAd = ref(null)
-  const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5122').replace(/\/$/, '')
+  const apiBase = getApiBaseUrl()
 
   function getAuthHeaders() {
     const token = localStorage.getItem('token')
@@ -12,7 +13,9 @@ export const useAdsStore = defineStore('ads', () => {
   }
 
   async function loadAds(params = {}) {
-    const query = new URLSearchParams(params).toString()
+    const normalized = { ...params }
+    if (Array.isArray(normalized.ids)) normalized.ids = normalized.ids.join(',')
+    const query = new URLSearchParams(normalized).toString()
     const response = await fetch(`${apiBase}/ads?${query}`, {
       headers: getAuthHeaders(),
     })

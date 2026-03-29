@@ -4,13 +4,14 @@ import { useRoute, useRouter } from 'vue-router'
 import Sortable from 'sortablejs'
 import { useAdsStore } from '../stores/adsStore'
 import { useCategoriesStore } from '../stores/categoriesStore'
+import { getApiBaseUrl } from '../config/apiBase'
 
 const adsStore = useAdsStore()
 const categoriesStore = useCategoriesStore()
 const route = useRoute()
 const router = useRouter()
 
-const apiBase = import.meta.env.VITE_API_BASE_URL || 'http://localhost:5122'
+const apiBase = getApiBaseUrl()
 
 function getImageUrl(path) {
   return `${apiBase}/${path}`
@@ -22,6 +23,7 @@ const MAX_IMAGES = 10
 const title = ref('')
 const description = ref('')
 const price = ref('')
+const isNegotiable = ref(false)
 const categoryId = ref('')
 const city = ref('')
 const type = ref('')
@@ -291,6 +293,7 @@ async function handleUpdate() {
     const payload = {}
     if (title.value !== initialAd.value.title) payload.title = title.value
     if (description.value !== initialAd.value.description) payload.description = description.value
+    if (isNegotiable.value !== Boolean(initialAd.value.isNegotiable)) payload.isNegotiable = isNegotiable.value
     if (price.value !== initialAd.value.price) payload.price = price.value
     if (categoryId.value !== initialAd.value.categoryId) payload.categoryId = categoryId.value
     if (city.value !== initialAd.value.city) payload.city = city.value
@@ -328,6 +331,7 @@ onMounted(async () => {
   title.value = adData.title || ''
   description.value = adData.description || ''
   price.value = adData.price || ''
+  isNegotiable.value = Boolean(adData.isNegotiable)
   categoryId.value = adData.categoryId || ''
   city.value = adData.city || ''
   type.value = adData.type || ''
@@ -393,6 +397,10 @@ onBeforeUnmount(() => {
             <div class="col-md-6">
               <label class="form-label">Цена (бел. руб.)</label>
               <input v-model="price" type="number" class="form-control" />
+              <div class="form-check mt-2">
+                <input class="form-check-input" type="checkbox" v-model="isNegotiable" id="negotiableCheckbox" />
+                <label class="form-check-label" for="negotiableCheckbox">Договорная цена</label>
+              </div>
             </div>
             <div class="col-md-6">
               <label class="form-label">Категория *</label>

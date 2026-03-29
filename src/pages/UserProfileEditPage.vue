@@ -2,6 +2,7 @@
 import { ref, computed, watchEffect } from 'vue'
 import { useUserStore } from '../stores/userStore'
 import { useRoute, useRouter } from 'vue-router'
+import { getApiBaseUrl } from '../config/apiBase'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -26,7 +27,7 @@ const avatarPreview = computed(() => {
   const v = editData.value.avatarPath
   if (!v) return ''
   if (/^data:/.test(v) || /^blob:/.test(v) || /^https?:\/\//.test(v)) return v
-  const apiBase = (import.meta.env.VITE_API_BASE_URL || 'http://localhost:5122').replace(/\/$/, '')
+  const apiBase = getApiBaseUrl()
   return apiBase + (v.startsWith('/') ? v : '/' + v)
 })
 
