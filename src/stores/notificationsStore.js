@@ -163,8 +163,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
     const normalizedConversationId = String(conversationId || '')
 
     if (normalizedConversationId && String(chatStore.currentConversation?.id || '') === normalizedConversationId) {
-      await chatStore.loadMessages(normalizedConversationId).catch(() => {})
-      await chatStore.markRead(normalizedConversationId).catch(() => {})
+      await chatStore.loadNewMessages(normalizedConversationId).catch(() => {})
       return
     }
 
@@ -198,63 +197,65 @@ export const useNotificationsStore = defineStore('notifications', () => {
 
   async function handleIncomingMessage(data) {
     const chatStore = useChatStore()
-    const payload = getIncomingMessagePayload(data)
-    const message = payload ? normalizeMessage(payload) : null
-    const convId = getIncomingConversationId(data, message)
+    const convId = String(
+      data?.conversationId ??
+      data?.conversation?.id ??
+      data?.payload?.conversationId ??
+      data?.data?.conversationId ??
+      ''
+    )
 
     if (!convId) {
-      if (isMessageRealtimeEvent(data)) scheduleConversationRefresh()
+      scheduleConversationRefresh()
       return
     }
+
+    const eventId = data?.id ?? data?.payload?.id ?? data?.data?.id ?? null
+    if (eventId != null && isDuplicateRealtimeMessage({ id: eventId })) return
 
     cancelScheduledConversationRefresh()
     cancelScheduledConversationRefresh(convId)
 
-    if (!message) {
-      scheduleConversationRefresh(convId)
-      return
-    }
-
-    if (isDuplicateRealtimeMessage(message)) return
-
-    if (!message.conversationId) message.conversationId = convId
-
     const currentConvId = String(chatStore.currentConversation?.id || '')
-    const currentUserId = getCurrentUserId()
-    const isOwnMessage = getMessageAuthorId(message) === currentUserId
 
     if (currentConvId && currentConvId === convId) {
-      const idx = chatStore.messages.findIndex(item => String(item.id) === String(message.id))
-      if (idx !== -1) chatStore.messages[idx] = { ...chatStore.messages[idx], ...message }
-      else chatStore.messages.push(message)
-
-      updateConversationPreview(chatStore.currentConversation, message)
-
-      const listConversation = chatStore.conversations.find(item => String(item.id) === convId)
-      if (listConversation) updateConversationPreview(listConversation, message)
+      const isFullPayload = data.authorId !== undefined
+      if (isFullPayload) {
+        const message = normalizeMessage(data)
+        const idx = chatStore.messages.findIndex(item => String(item.id) === String(message.id))
+        if (idx !== -1) chatStore.messages[idx] = { ...chatStore.messages[idx], ...message }
+        else chatStore.messages.push(message)
+        const numId = Number(message.id)
+        if (!isNaN(numId) && (chatStore.lastKnownId === null || numId > chatStore.lastKnownId)) {
+          chatStore.lastKnownId = numId
+        }
+        if (chatStore.currentConversation) updateConversationPreview(chatStore.currentConversation, message)
+        const convInList = chatStore.conversations.find(item => String(item.id) === convId)
+        if (convInList) updateConversationPreview(convInList, message)
+      } else {
+        await chatStore.loadNewMessages(convId)
+        const lastMsg = chatStore.messages[chatStore.messages.length - 1]
+        if (lastMsg) {
+          if (chatStore.currentConversation) updateConversationPreview(chatStore.currentConversation, lastMsg)
+          const convInList = chatStore.conversations.find(item => String(item.id) === convId)
+          if (convInList) updateConversationPreview(convInList, lastMsg)
+        }
+      }
       moveConversationToTop(chatStore.conversations, convId)
-
-      chatStore.markRead(convId).catch(() => {})
       return
     }
 
     let conversation = chatStore.conversations.find(item => String(item.id) === convId)
-    let conversationsWereRefreshed = false
 
     if (!conversation) {
       await chatStore.getConversations().catch(() => {})
-      conversationsWereRefreshed = true
-      conversation = chatStore.conversations.find(item => String(item.id) === convId)
+      return
     }
 
-    if (!conversation) return
-
-    updateConversationPreview(conversation, message)
+    conversation.unreadCount = (Number(conversation.unreadCount) || 0) + 1
+    conversation.hasUnread = true
     moveConversationToTop(chatStore.conversations, convId)
-
-    if (!message.isRead && !isOwnMessage && !conversationsWereRefreshed) {
-      conversation.unreadCount = (Number(conversation.unreadCount) || 0) + 1
-    }
+    scheduleConversationRefresh()
   }
 
   function updateConversationPreview(conversation, message) {
@@ -285,6 +286,16 @@ export const useNotificationsStore = defineStore('notifications', () => {
     notifications.value.forEach((notification) => {
       if (set.has(String(notification.id))) notification.isRead = true
     })
+  }
+
+  async function joinConversation(conversationId) {
+    if (!connection || connection.state !== signalR.HubConnectionState.Connected) return
+    await connection.invoke('JoinConversation', String(conversationId)).catch(() => {})
+  }
+
+  async function leaveConversation(conversationId) {
+    if (!connection || connection.state !== signalR.HubConnectionState.Connected) return
+    await connection.invoke('LeaveConversation', String(conversationId)).catch(() => {})
   }
 
   async function fetchNotifications() {
@@ -352,5 +363,5 @@ export const useNotificationsStore = defineStore('notifications', () => {
     pendingConversationRefreshes.clear()
   }
 
-  return { notifications, unreadCount, groupedNotifications, fetchNotifications, markRead, connect, disconnect }
+  return { notifications, unreadCount, groupedNotifications, fetchNotifications, markRead, connect, disconnect, joinConversation, leaveConversation }
 })

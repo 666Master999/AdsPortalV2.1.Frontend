@@ -3,13 +3,18 @@ import { ref, reactive, onMounted, onBeforeUnmount, watch, computed, nextTick } 
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '../stores/chatStore'
 import { useUserStore } from '../stores/userStore'
+import { useNotificationsStore } from '../stores/notificationsStore'
 import { getApiBaseUrl } from '../config/apiBase'
 import { timeAgo, chatTime, messageTime } from '../utils/formatDate'
+import { useReadTracker } from '../composables/useReadTracker'
+import { useScrollManager } from '../composables/useScrollManager'
+import { useMediaViewer } from '../composables/useMediaViewer'
 
 const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
 const userStore = useUserStore()
+const notificationsStore = useNotificationsStore()
 
 // Состояние чата и редактора сообщений.
 const messagesContainer = ref(null)
@@ -23,27 +28,12 @@ const composer = reactive({
 })
 const outgoingMessageSeq = ref(0)
 const pendingAdId = ref(null)
-const lastSeenMsgId = ref(null)
-let readDebounceTimer = null
-let messageObserver = null
-const observedMessageIds = new Set()
-const mediaViewerViewport = ref(null)
-const mediaViewerMessage = ref(null)
-const mediaViewerAttachments = ref([])
-const mediaViewerIndex = ref(0)
-const mediaViewerZoom = ref(1)
-const mediaViewerPanX = ref(0)
-const mediaViewerPanY = ref(0)
-const mediaViewerTapState = ref({
-  lastTapAt: 0,
-  lastTapX: 0,
-  lastTapY: 0
+const readTracker = useReadTracker(messagesContainer, (msg) => {
+  const idVal = msg?.id
+  const hasServerId = Number.isFinite(Number(idVal)) && !String(idVal).startsWith('local-')
+  return !isMine(msg) && hasServerId
 })
-
-const mediaViewerPointerPositions = new Map()
-const mediaViewerPointerStarts = new Map()
-const mediaViewerPointerMoved = new Set()
-let mediaViewerGesture = null
+const scrollManager = useScrollManager(messagesContainer)
 
 const conversationId = computed(() => route.params.conversationId || null)
 const adId = computed(() => route.params.adId || null)
@@ -77,12 +67,30 @@ function matchesType(pathOrFile, mimePrefix, extRe) {
   if (!pathOrFile) return false
   if (isFileObject(pathOrFile))
     return String(pathOrFile.type || '').startsWith(mimePrefix) || extRe.test(String(pathOrFile.name || ''))
+  // Handle { url, type } attachment objects from API
+  if (typeof pathOrFile === 'object') {
+    const typeStr = String(pathOrFile.type || pathOrFile.kind || '').toLowerCase()
+    const contentTypeStr = String(
+      pathOrFile.contentType ||
+      pathOrFile.mimeType ||
+      pathOrFile.metadata?.contentType ||
+      pathOrFile.metadata?.mimeType ||
+      ''
+    ).toLowerCase()
+    if (typeStr === 'image') return mimePrefix === 'image/'
+    if (typeStr === 'video') return mimePrefix === 'video/'
+    if (typeStr === 'audio') return mimePrefix === 'audio/'
+    if (contentTypeStr.startsWith(mimePrefix)) return true
+    const urlStr = String(pathOrFile.url || pathOrFile.path || pathOrFile.src || '')
+    return extRe.test(urlStr.split('?')[0])
+  }
   return extRe.test(String(pathOrFile).split('?')[0])
 }
 
 const isImageAttachment = (p) => matchesType(p, 'image/', IMG_RE)
 const isAudioAttachment = (p) => matchesType(p, 'audio/', AUD_RE)
 const isVideoAttachment = (p) => matchesType(p, 'video/', VID_RE)
+const mediaViewer = useMediaViewer({ buildUrl, isVideoAttachment })
 
 
 function getInitial(name, fallback = '?') {
@@ -101,71 +109,42 @@ function resizeTextarea() {
   nextTick(() => autoResize())
 }
 
-function scrollToBottom() {
-  nextTick(() => {
-    if (messagesContainer.value) messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
-  })
+function isMessageRead(msg) {
+  const messageId = Number(msg?.id)
+  if (Number.isNaN(messageId)) return false
+
+  const boundary = isMine(msg)
+    ? chatStore.otherLastSeenMessageId
+    : chatStore.myLastSeenMessageId
+
+  const boundaryId = Number(boundary)
+  return boundary != null && !Number.isNaN(boundaryId) && messageId <= boundaryId
 }
 
-function scrollToFirstUnread() {
-  nextTick(() => {
-    const fid = chatStore.firstUnreadMessageId
-    if (fid) {
-      const el = document.getElementById(`message-${fid}`)
-      if (el) { el.scrollIntoView({ behavior: 'instant', block: 'start' }); return }
-    }
-    if (messagesContainer.value) messagesContainer.value.scrollTop = messagesContainer.value.scrollHeight
-  })
+function getReceipt(msg) {
+  const read = isMessageRead(msg)
+  return { icon: read ? '✓✓' : '✓', cls: read ? 'text-primary' : 'text-secondary' }
 }
 
-function disconnectMessageObserver() {
-  if (messageObserver) { messageObserver.disconnect(); messageObserver = null }
-  observedMessageIds.clear()
-}
+const unreadDividerId = ref(null)
 
-function flushReadUpdate() {
-  if (readDebounceTimer) { clearTimeout(readDebounceTimer); readDebounceTimer = null }
-  const cid = chatStore.currentConversation?.id
-  const msgId = lastSeenMsgId.value
-  if (cid && msgId != null) {
-    lastSeenMsgId.value = null
-    chatStore.markRead(cid, msgId)
+function findFirstUnreadIncomingMessageId(lastSeenMessageId = chatStore.myLastSeenMessageId, list = chatStore.messages) {
+  if (lastSeenMessageId == null) return null
+
+  const lastSeenNum = Number(lastSeenMessageId)
+  if (Number.isNaN(lastSeenNum)) return null
+
+  for (const msg of list || []) {
+    const messageId = Number(msg?.id)
+    if (Number.isNaN(messageId) || isMine(msg)) continue
+    if (messageId > lastSeenNum) return msg.id
   }
+
+  return null
 }
 
-function scheduleReadUpdate(messageId) {
-  const numId = Number(messageId)
-  if (!numId || isNaN(numId)) return
-  const current = lastSeenMsgId.value ? Number(lastSeenMsgId.value) : 0
-  if (numId <= current) return
-  lastSeenMsgId.value = String(messageId)
-  if (readDebounceTimer) clearTimeout(readDebounceTimer)
-  readDebounceTimer = setTimeout(flushReadUpdate, 500)
-}
-
-function observeCounterpartMessages() {
-  if (!messageObserver) return
-  for (const msg of chatStore.messages) {
-    if (isMine(msg) || isOutgoingMessage(msg)) continue
-    const msgId = String(msg.id)
-    if (observedMessageIds.has(msgId)) continue
-    const el = document.getElementById(`message-${msgId}`)
-    if (el) { observedMessageIds.add(msgId); messageObserver.observe(el) }
-  }
-}
-
-function setupMessageObserver() {
-  disconnectMessageObserver()
-  const root = messagesContainer.value
-  if (!root) return
-  messageObserver = new IntersectionObserver((entries) => {
-    for (const entry of entries) {
-      if (!entry.isIntersecting) continue
-      const rawId = entry.target.id?.replace('message-', '')
-      if (rawId) scheduleReadUpdate(rawId)
-    }
-  }, { root, threshold: 0 })
-  observeCounterpartMessages()
+function captureUnreadDivider() {
+  unreadDividerId.value = findFirstUnreadIncomingMessageId()
 }
 
 function isMine(msg) {
@@ -192,26 +171,14 @@ function convPreviewUrl(conv) {
   return conv.lastMessageType === 1 && conv.lastMessageText ? buildUrl(conv.lastMessageText) : null
 }
 
-function messageDomId(message) {
-  return `message-${message.id}`
-}
-
-function isMessageRead(message) {
-  return message.isRead !== false
-}
-
-function getReceiptIcon(message) {
-  return isMessageRead(message) ? '✓✓' : '✓'
-}
-
 function getReplyMessage(message) {
   if (!message?.replyToMessageId) return null
   return chatStore.messages.find(item => String(item.id) === String(message.replyToMessageId)) || null
 }
 
 function scrollToMessage(messageId) {
-  const element = document.getElementById(messageDomId({ id: messageId }))
-  if (element) element.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  const el = document.getElementById(`message-${messageId}`)
+  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
 }
 
 function getMessageAttachments(msg) {
@@ -242,15 +209,7 @@ function getMessagePreviewLabel(msg) {
 }
 
 function getMediaAttachments(msg) {
-  return getMessageAttachments(msg).filter(att => {
-    const type = String(att?.type || '').toLowerCase()
-    return type === 'image' || type === 'video' || isImageAttachment(att) || isVideoAttachment(att)
-  })
-}
-
-function isHeroImageAttachment(msg, index) {
-  const count = getMediaAttachments(msg).length
-  return count === 1 || (count === 3 && index === 0)
+  return getMessageAttachments(msg).filter(att => isImageAttachment(att) || isVideoAttachment(att))
 }
 
 function getAudioAttachments(msg) {
@@ -258,18 +217,36 @@ function getAudioAttachments(msg) {
 }
 
 function getFileAttachments(msg) {
-  return getMessageAttachments(msg).filter(p => !isImageAttachment(p) && !isAudioAttachment(p) && !isVideoAttachment(p))
+  return getMessageAttachments(msg).filter(att => !isImageAttachment(att) && !isAudioAttachment(att) && !isVideoAttachment(att))
 }
 
-function getAttachmentName(path) {
-  if (isFileObject(path)) return path.name || 'Файл'
-  if (path && typeof path === 'object') return path.name || path.fileName || path.filename || path.originalName || path.url || path.path || 'Файл'
-  return String(path || '').replace(/\\/g, '/').split('/').pop() || String(path || '')
+function getAttachmentName(att) {
+  if (isFileObject(att)) return att.name || 'Файл'
+  if (att && typeof att === 'object') {
+    if (att.name || att.fileName || att.filename || att.originalName)
+      return att.name || att.fileName || att.filename || att.originalName
+    const raw = String(att.url || att.path || att.src || att.filePath || att.value || '').split('?')[0].replace(/\\/g, '/')
+    return raw.split('/').pop() || 'Файл'
+  }
+  const raw = String(att || '').split('?')[0].replace(/\\/g, '/')
+  return raw.split('/').pop() || String(att || '')
 }
 
-function getAttachmentSrc(att) {
-  return isFileObject(att) ? (att._preview || '') : buildUrl(att)
+function getMessageContentStyle(msg) {
+  return getAudioAttachments(msg).length ? 'width: 100%; max-width: min(96vw, 520px);' : 'max-width: min(72%, 620px);'
 }
+
+const ATTACHMENT_META = { image: ['Изображение', '🖼️'], video: ['Видео', '🎬'], audio: ['Аудио', '🎵'], file: ['Файл', '📄'] }
+
+function getAttachmentKind(att) {
+  if (isImageAttachment(att)) return 'image'
+  if (isVideoAttachment(att)) return 'video'
+  if (isAudioAttachment(att)) return 'audio'
+  return 'file'
+}
+
+function getAttachmentKindLabel(att) { return ATTACHMENT_META[getAttachmentKind(att)][0] }
+function getAttachmentKindEmoji(att) { return ATTACHMENT_META[getAttachmentKind(att)][1] }
 
 function setFilePreview(file) {
   try { if (file && !file._preview) file._preview = URL.createObjectURL(file) } catch {}
@@ -284,196 +261,9 @@ function revokeFilePreview(file) {
   } catch {}
 }
 
-// Геометрия и управление просмотрщиком изображений.
-function clamp(value, min, max) {
-  return Math.min(max, Math.max(min, value))
+function openMediaViewer(msg, index = 0) {
+  mediaViewer.open(msg, getMediaAttachments(msg), index)
 }
-
-function getMediaViewerRect() {
-  return mediaViewerViewport.value?.getBoundingClientRect() || null
-}
-
-function resetMediaViewerTransform() {
-  mediaViewerZoom.value = 1
-  mediaViewerPanX.value = 0
-  mediaViewerPanY.value = 0
-}
-
-function resetViewerPointerState() {
-  mediaViewerPointerPositions.clear()
-  mediaViewerPointerStarts.clear()
-  mediaViewerPointerMoved.clear()
-  mediaViewerGesture = null
-  mediaViewerTapState.value = { lastTapAt: 0, lastTapX: 0, lastTapY: 0 }
-}
-
-function isMediaViewerCentered() {
-  return mediaViewerZoom.value <= 1
-}
-
-function clampMediaViewerPan(x, y, zoom) {
-  const rect = getMediaViewerRect()
-  if (!rect) return { x, y }
-  const lx = Math.max(0, (rect.width * (zoom - 1)) / 2)
-  const ly = Math.max(0, (rect.height * (zoom - 1)) / 2)
-  return { x: clamp(x, -lx, lx), y: clamp(y, -ly, ly) }
-}
-
-function getViewerRelativePoint(event) {
-  const rect = getMediaViewerRect()
-  if (!rect) return null
-
-  return {
-    x: event.clientX - rect.left - rect.width / 2,
-    y: event.clientY - rect.top - rect.height / 2
-  }
-}
-
-function openMediaViewer(message, index = 0) {
-  const media = getMediaAttachments(message)
-  if (!media.length) return
-  mediaViewerMessage.value = message
-  mediaViewerAttachments.value = media
-  mediaViewerIndex.value = clamp(index, 0, media.length - 1)
-  resetViewerPointerState()
-  resetMediaViewerTransform()
-}
-
-function closeMediaViewer() {
-  mediaViewerMessage.value = null
-  mediaViewerAttachments.value = []
-  mediaViewerIndex.value = 0
-  resetViewerPointerState()
-  resetMediaViewerTransform()
-}
-
-function switchMedia(delta) {
-  const next = mediaViewerIndex.value + delta
-  if (next < 0 || next >= mediaViewerAttachments.value.length) return
-  mediaViewerIndex.value = next
-  resetViewerPointerState()
-  resetMediaViewerTransform()
-}
-const previousMedia = () => switchMedia(-1)
-const nextMedia = () => switchMedia(1)
-
-function zoomMediaViewerTo(targetZoom, anchorPoint = null) {
-  const nextZoom = clamp(targetZoom, 1, 4)
-  if (nextZoom === 1) return resetMediaViewerTransform()
-  const anchor = anchorPoint || { x: 0, y: 0 }
-  const zoomRatio = nextZoom / mediaViewerZoom.value
-  const bounded = clampMediaViewerPan(
-    anchor.x - (anchor.x - mediaViewerPanX.value) * zoomRatio,
-    anchor.y - (anchor.y - mediaViewerPanY.value) * zoomRatio,
-    nextZoom
-  )
-  mediaViewerZoom.value = nextZoom
-  mediaViewerPanX.value = bounded.x
-  mediaViewerPanY.value = bounded.y
-}
-
-function handleMediaViewerDoubleTap(point) {
-  if (!point) return
-  isMediaViewerCentered() ? zoomMediaViewerTo(2.25, point) : resetMediaViewerTransform()
-}
-
-function handleViewerWheel(event) {
-  if (!mediaViewerMessage.value) return
-  event.preventDefault()
-  if (!event.ctrlKey && !event.metaKey) {
-    if (event.deltaY > 0) nextMedia(); else if (event.deltaY < 0) previousMedia()
-    return
-  }
-  const rect = getMediaViewerRect()
-  if (!rect) return
-  const nextZoom = clamp(mediaViewerZoom.value * (event.deltaY < 0 ? 1.12 : 0.88), 1, 4)
-  if (nextZoom === 1) return resetMediaViewerTransform()
-  const cx = event.clientX - rect.left - rect.width / 2
-  const cy = event.clientY - rect.top - rect.height / 2
-  const zoomRatio = nextZoom / mediaViewerZoom.value
-  const bounded = clampMediaViewerPan(cx - (cx - mediaViewerPanX.value) * zoomRatio, cy - (cy - mediaViewerPanY.value) * zoomRatio, nextZoom)
-  mediaViewerZoom.value = nextZoom
-  mediaViewerPanX.value = bounded.x
-  mediaViewerPanY.value = bounded.y
-}
-
-function handleViewerClick(event) {
-  if (!mediaViewerMessage.value) return
-  const ts = mediaViewerTapState.value
-  const now = Date.now()
-  if (ts.lastTapAt && now - ts.lastTapAt < 280) {
-    mediaViewerTapState.value = { lastTapAt: 0, lastTapX: 0, lastTapY: 0 }
-    handleMediaViewerDoubleTap(getViewerRelativePoint(event))
-    return
-  }
-  const point = getViewerRelativePoint(event)
-  mediaViewerTapState.value = { lastTapAt: now, lastTapX: point?.x ?? 0, lastTapY: point?.y ?? 0 }
-}
-
-function handleViewerPointerDown(event) {
-  if (!mediaViewerMessage.value) return
-  const position = getViewerRelativePoint(event)
-  if (!position) return
-  mediaViewerPointerPositions.set(event.pointerId, position)
-  mediaViewerPointerStarts.set(event.pointerId, position)
-  mediaViewerPointerMoved.delete(event.pointerId)
-  if (mediaViewerPointerPositions.size === 1 && mediaViewerZoom.value > 1) {
-    mediaViewerGesture = { type: 'pan', pointerId: event.pointerId, startX: position.x, startY: position.y, startPanX: mediaViewerPanX.value, startPanY: mediaViewerPanY.value }
-  }
-  if (mediaViewerPointerPositions.size >= 2) {
-    const [fId, sId] = Array.from(mediaViewerPointerPositions.keys())
-    const f = mediaViewerPointerPositions.get(fId), s = mediaViewerPointerPositions.get(sId)
-    if (!f || !s) return
-    mediaViewerGesture = { type: 'pinch', pointerIds: [fId, sId], startDistance: Math.hypot(f.x - s.x, f.y - s.y) || 1, startZoom: mediaViewerZoom.value, startPanX: mediaViewerPanX.value, startPanY: mediaViewerPanY.value }
-  }
-  event.currentTarget.setPointerCapture?.(event.pointerId)
-}
-
-function handleViewerPointerMove(event) {
-  if (!mediaViewerMessage.value || !mediaViewerPointerPositions.has(event.pointerId)) return
-  const position = getViewerRelativePoint(event)
-  if (!position) return
-  mediaViewerPointerPositions.set(event.pointerId, position)
-  const startPos = mediaViewerPointerStarts.get(event.pointerId)
-  if (startPos && Math.hypot(position.x - startPos.x, position.y - startPos.y) > 8) mediaViewerPointerMoved.add(event.pointerId)
-
-  if (mediaViewerGesture?.type === 'pinch') {
-    const [fId, sId] = mediaViewerGesture.pointerIds
-    const f = mediaViewerPointerPositions.get(fId), s = mediaViewerPointerPositions.get(sId)
-    if (!f || !s) return
-    const dist = Math.hypot(f.x - s.x, f.y - s.y) || 1
-    const nextZoom = clamp(mediaViewerGesture.startZoom * (dist / mediaViewerGesture.startDistance), 1, 4)
-    if (nextZoom === 1) return resetMediaViewerTransform()
-    const cx = (f.x + s.x) / 2, cy = (f.y + s.y) / 2
-    const ratio = nextZoom / mediaViewerGesture.startZoom
-    const bounded = clampMediaViewerPan(cx - (cx - mediaViewerGesture.startPanX) * ratio, cy - (cy - mediaViewerGesture.startPanY) * ratio, nextZoom)
-    mediaViewerZoom.value = nextZoom
-    mediaViewerPanX.value = bounded.x
-    mediaViewerPanY.value = bounded.y
-    return
-  }
-  if (mediaViewerGesture?.type === 'pan' && mediaViewerGesture.pointerId === event.pointerId) {
-    const bounded = clampMediaViewerPan(mediaViewerGesture.startPanX + (position.x - mediaViewerGesture.startX), mediaViewerGesture.startPanY + (position.y - mediaViewerGesture.startY), mediaViewerZoom.value)
-    mediaViewerPanX.value = bounded.x
-    mediaViewerPanY.value = bounded.y
-  }
-}
-
-function handleViewerPointerEnd(event) {
-  if (!mediaViewerMessage.value) return
-  mediaViewerPointerPositions.delete(event.pointerId)
-  mediaViewerPointerStarts.delete(event.pointerId)
-  mediaViewerPointerMoved.delete(event.pointerId)
-  event.currentTarget.releasePointerCapture?.(event.pointerId)
-  if (!mediaViewerPointerPositions.size) { mediaViewerGesture = null; return }
-  if (mediaViewerPointerPositions.size === 1) {
-    const [rid, rpos] = mediaViewerPointerPositions.entries().next().value
-    mediaViewerGesture = mediaViewerZoom.value > 1
-      ? { type: 'pan', pointerId: rid, startX: rpos.x, startY: rpos.y, startPanX: mediaViewerPanX.value, startPanY: mediaViewerPanY.value }
-      : null
-  }
-}
-const handleViewerPointerCancel = handleViewerPointerEnd
 
 function attachmentsEqual(a, b) {
   if (!Array.isArray(a) || !Array.isArray(b)) return a === b
@@ -511,7 +301,7 @@ async function sendNewMessage() {
     adId: pendingAdId.value || adId.value,
   })
   chatStore.messages.push(draft)
-  scrollToBottom()
+  scrollManager.scrollToBottom()
   resetComposer({ revokePreviews: false })
   await sendOutgoingMessageDraft(draft)
 }
@@ -537,7 +327,7 @@ function createOutgoingMessageDraft({ text, attachments, conversationId, adId, r
   return {
     id: retryFromId || messageId, authorId, senderId: authorId, author: userStore.user || null,
     text: text ?? '', attachments: Array.isArray(attachments) ? attachments : [],
-    createdAt: new Date().toISOString(), isRead: false, clientStatus: 'sending', clientError: null,
+    createdAt: new Date().toISOString(), clientStatus: 'sending', clientError: null,
     clientDraft: { text: text ?? '', attachments: Array.isArray(attachments) ? attachments : [], conversationId: conversationId ?? null, adId: adId ?? null },
   }
 }
@@ -554,13 +344,34 @@ async function sendOutgoingMessageDraft(message) {
     const result = cid
       ? (attachments.length ? await chatStore.sendAttachments(cid, attachments, draft.text) : await chatStore.sendMessage(cid, draft.text, []))
       : await chatStore.sendMessageByAdId(adIdVal, draft.text, attachments)
+    console.log('[sendOutgoing] server result:', result)
     cleanupMessagePreviews(message)
+
+    // Ensure server message is present in the messages list. In some race
+    // conditions the server response may not be reflected in the DOM
+    // immediately; insert the server message into the store if missing.
+    try {
+      const serverMsg = result?.message ?? result
+      const serverId = serverMsg?.id ?? null
+      if (serverId != null) {
+        const exists = chatStore.messages.find(m => String(m.id) === String(serverId))
+        if (!exists) {
+          const normalized = chatStore.normalizeMessage ? chatStore.normalizeMessage(serverMsg) : serverMsg
+          chatStore.messages.push(normalized)
+          console.log('[sendOutgoing] injected server message into store', normalized.id)
+        }
+      }
+    } catch (e) {
+      console.warn('[sendOutgoing] failed to ensure server message in store', e)
+    }
+
+    // Remove only the local draft copy (keep server message visible)
     removeLocalMessage(message.id)
     if (result?.conversationId && !cid) {
       pendingAdId.value = null
       await router.replace(`/chat/${result.conversationId}`)
     }
-    scrollToBottom()
+    scrollManager.scrollToBottom()
     return true
   } catch (err) {
     message.clientStatus = 'failed'
@@ -627,16 +438,24 @@ function selectConversation(id) { if (id) router.push(`/chat/${id}`) }
 
 async function initChat() {
   try {
-    flushReadUpdate()
-    disconnectMessageObserver()
-    closeMediaViewer()
+    const prevConvId = chatStore.currentConversation?.id
+    if (prevConvId) notificationsStore.leaveConversation(prevConvId)
+    unreadDividerId.value = null
+    readTracker.flushRead()
+    readTracker.disconnectObserver()
+    mediaViewer.close()
     for (const m of chatStore.messages || []) cleanupMessagePreviews(m)
     if (!chatStore.conversations.length) await chatStore.getConversations()
     if (conversationId.value) {
       pendingAdId.value = null
       await chatStore.loadConversation(conversationId.value, { skipConversationsFetch: true })
-      scrollToFirstUnread()
-      nextTick(() => setupMessageObserver())
+      captureUnreadDivider()
+      notificationsStore.joinConversation(conversationId.value)
+      scrollManager.scrollToAnchorOrBottom(chatStore.anchorMessageId)
+      // Expose store for quick debugging in DevTools console.
+      try { window.__chatStore = chatStore } catch {}
+      try { window.__sendOutgoing = sendOutgoingMessageDraft } catch {}
+      nextTick(() => readTracker.setupObserver())
       return
     }
     if (adId.value) {
@@ -644,11 +463,13 @@ async function initChat() {
       const existing = await chatStore.findConversationByAdId(adId.value)
       if (existing?.id) return router.replace(`/chat/${existing.id}`)
       pendingAdId.value = adId.value
+      unreadDividerId.value = null
       chatStore.currentConversation = { id: null, adId: adId.value, title: `Чат по объявлению ${adId.value}` }
       chatStore.messages = []
       return
     }
     pendingAdId.value = null
+    unreadDividerId.value = null
     chatStore.currentConversation = null
     chatStore.messages = []
   } catch (err) {
@@ -686,28 +507,34 @@ onMounted(initChat)
 watch(() => route.params.conversationId, initChat)
 watch(() => route.params.adId, initChat)
 
-function handleViewerKeydown(event) {
-  if (!mediaViewerMessage.value) return
-  if (event.key === 'Escape') closeMediaViewer()
-  if (event.key === 'ArrowLeft') previousMedia()
-  if (event.key === 'ArrowRight') nextMedia()
-}
-
-watch(mediaViewerMessage, (current) => {
-  if (current) window.addEventListener('keydown', handleViewerKeydown)
-  else window.removeEventListener('keydown', handleViewerKeydown)
+watch(() => chatStore.messages.length, () => {
+  nextTick(() => readTracker.observeMessages())
 })
 
-watch(() => chatStore.messages.length, () => {
-  nextTick(() => observeCounterpartMessages())
+watch(() => chatStore.lastKnownId, (newId, oldId) => {
+  if (newId && oldId && Number(newId) > Number(oldId)) {
+    nextTick(() => {
+      const newestMessage = chatStore.messages[chatStore.messages.length - 1] || null
+      if (scrollManager.isAtBottom.value) {
+        scrollManager.scrollToBottom()
+      } else {
+        scrollManager.hasNewBelow.value = true
+        if (!unreadDividerId.value && newestMessage && !isMine(newestMessage)) {
+          unreadDividerId.value = newestMessage.id
+        }
+      }
+    })
+  }
 })
 
 onBeforeUnmount(() => {
-  flushReadUpdate()
-  disconnectMessageObserver()
-  window.removeEventListener('keydown', handleViewerKeydown)
+  const prevConvId = chatStore.currentConversation?.id
+  if (prevConvId) notificationsStore.leaveConversation(prevConvId)
+  readTracker.cleanup()
+  try { delete window.__chatStore } catch {}
+  try { delete window.__sendOutgoing } catch {}
   for (const m of chatStore.messages || []) cleanupMessagePreviews(m)
-  resetViewerPointerState()
+  mediaViewer.close()
   try { for (const att of composer.attachments || []) if (isFileObject(att)) revokeFilePreview(att) } catch {}
 })
 
@@ -718,13 +545,6 @@ const isConversationSelected = computed(() => Boolean(selectedConversationId.val
 
 const adImageUrl = computed(() => buildUrl(currentConv.value?.ad?.mainImagePath))
 const adLink = computed(() => currentConv.value?.ad?.id ? `/ads/${currentConv.value.ad.id}` : null)
-const mediaViewerCurrentAttachment = computed(() => mediaViewerAttachments.value[mediaViewerIndex.value] || null)
-const mediaViewerCurrentUrl = computed(() => buildUrl(mediaViewerCurrentAttachment.value))
-const mediaViewerCurrentIsVideo = computed(() => isVideoAttachment(mediaViewerCurrentAttachment.value) || String(mediaViewerCurrentAttachment.value?.type || '').toLowerCase() === 'video')
-const mediaViewerImageStyle = computed(() => ({
-  transform: `translate(-50%, -50%) translate3d(${mediaViewerPanX.value}px, ${mediaViewerPanY.value}px, 0) scale(${mediaViewerZoom.value})`,
-  cursor: mediaViewerZoom.value > 1 ? 'grab' : 'zoom-in'
-}))
 
 const moderation = computed(() => {
   const key = String(currentConv.value?.ad?.moderationStatus ?? currentConv.value?.moderationStatus ?? '').trim().toLowerCase()
@@ -874,7 +694,7 @@ const counterpart = computed(() => {
             </div>
 
             <!-- Лента сообщений и вложений. -->
-            <div ref="messagesContainer" class="flex-grow-1 overflow-auto p-3 p-lg-4" style="min-height: 0; background: linear-gradient(180deg, rgba(248,249,250,1) 0%, rgb(236, 240, 244) 100%);">
+            <div ref="messagesContainer" @scroll.passive="scrollManager.updateScrollState" class="flex-grow-1 overflow-auto p-3 p-lg-4" style="min-height: 0; background: linear-gradient(180deg, rgba(248,249,250,1) 0%, rgb(236, 240, 244) 100%);">
               <div v-if="chatStore.error" class="alert alert-danger mb-3">{{ chatStore.error }}</div>
               <div v-if="chatStore.hasMore" class="text-center mb-3">
                 <button class="btn btn-outline-secondary btn-sm rounded-pill px-3" :disabled="chatStore.isLoading" @click="loadMore">
@@ -890,7 +710,13 @@ const counterpart = computed(() => {
                 </div>
               </div>
 
-              <div v-for="msg in chatStore.messages" :key="msg.id" :id="'message-' + msg.id" class="d-flex mb-3" :class="isMine(msg) ? 'justify-content-end' : 'justify-content-start'">
+              <template v-for="msg in chatStore.messages" :key="msg.id">
+                <div v-if="String(msg.id) === String(unreadDividerId)" class="d-flex align-items-center gap-2 mb-3">
+                  <div class="flex-grow-1" style="border-top: 2px solid var(--bs-primary);"></div>
+                  <small class="text-primary fw-semibold flex-shrink-0">Новые сообщения</small>
+                  <div class="flex-grow-1" style="border-top: 2px solid var(--bs-primary);"></div>
+                </div>
+                <div :id="'message-' + msg.id" class="d-flex mb-3" :class="isMine(msg) ? 'justify-content-end' : 'justify-content-start'">
                 <!-- Аватар второго участника. -->
                 <div v-if="!isMine(msg)" class="rounded-circle flex-shrink-0 me-2 align-self-end overflow-hidden bg-secondary-subtle border d-flex align-items-center justify-content-center text-secondary" style="width: 30px; height: 30px; font-size: 0.75rem; font-weight: 600;">
                   <img v-if="getAuthorAvatar(msg)" v-intersect-lazy="getAuthorAvatar(msg)" class="w-100 h-100" style="object-fit: cover;" alt="">
@@ -898,7 +724,7 @@ const counterpart = computed(() => {
                 </div>
 
                 <!-- Пузырь сообщения и его содержимое. -->
-                <div class="d-inline-block" style="max-width: min(72%, 620px);">
+                <div class="d-inline-block min-w-0" :style="getMessageContentStyle(msg)">
                   <div v-if="!isMine(msg)" class="small text-secondary mb-1 ms-1">{{ getAuthorName(msg) ?? msg.authorId ?? msg.senderId ?? 'нет данных' }}</div>
                   <div class="px-3 py-2 px-lg-4 py-lg-3 rounded-4 shadow-sm border position-relative"
                     :class="[
@@ -935,36 +761,49 @@ const counterpart = computed(() => {
                           v-for="(att, i) in getMediaAttachments(msg)"
                           :key="`${msg.id}-${att}-${i}`"
                           type="button"
-                          class="btn p-0 border border-white border-opacity-10 shadow-sm"
-                          :style="{ width: '150px', flexShrink: 0 }"
+                          class="btn p-0 border border-primary-subtle shadow-sm overflow-hidden rounded-4 bg-white"
+                          :style="{ width: '174px', flexShrink: 0, transition: 'transform 0.18s ease, box-shadow 0.18s ease' }"
+                          :aria-label="isVideoAttachment(att) ? 'Открыть видео' : 'Открыть изображение'"
+                          :title="isVideoAttachment(att) ? 'Открыть видео' : 'Открыть изображение'"
                           @click="openMediaViewer(msg, i)"
                         >
-                          <div
-                            :class="[
-                              'ratio',
-                              isHeroImageAttachment(msg, i) ? 'ratio-16x9' : 'ratio-4x3'
-                            ]"
-                            style="width: 150px;"
-                          >
-                            <!-- Картинка -->
-                            <img
-                              v-if="att.type === 'image' || isImageAttachment(att)"
-                              v-intersect-lazy="buildUrl(att)"
-                              class="w-100 h-100"
-                              style="object-fit: cover;"
-                              decoding="async"
-                            />
-
-                            <!-- Видео -->
-                            <video
-                              v-else-if="att.type === 'video' || isVideoAttachment(att)"
-                              preload="metadata"
-                              playsinline
-                              class="w-100 h-100"
-                              style="object-fit: cover; background: black;"
+                          <div class="ratio ratio-4x3" style="width: 174px;">
+                            <div
+                              class="position-relative w-100 h-100 overflow-hidden"
+                              style="background: linear-gradient(180deg, rgba(248, 249, 250, 1) 0%, rgba(236, 242, 255, 1) 100%);"
                             >
-                              <source :src="buildUrl(att)" />
-                            </video>
+                              <!-- Картинка -->
+                              <img
+                                v-if="isImageAttachment(att)"
+                                v-intersect-lazy="buildUrl(att)"
+                                class="w-100 h-100 d-block"
+                                style="object-fit: cover;"
+                                decoding="async"
+                                alt="Вложение"
+                              />
+
+                              <!-- Видео -->
+                              <video
+                                v-else-if="isVideoAttachment(att)"
+                                preload="metadata"
+                                playsinline
+                                class="w-100 h-100 d-block"
+                                style="object-fit: cover; background: black;"
+                              >
+                                <source :src="buildUrl(att)" />
+                              </video>
+
+                              <span
+                                v-if="isVideoAttachment(att)"
+                                class="position-absolute top-50 start-50 translate-middle rounded-circle border border-primary-subtle shadow-sm d-inline-flex align-items-center justify-content-center text-primary pe-none"
+                                style="width: 44px; height: 44px; background: rgba(255, 255, 255, 0.76); backdrop-filter: blur(10px);"
+                                aria-hidden="true"
+                              >
+                                <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" role="presentation" focusable="false">
+                                  <path d="M8 5.5v13l11-6.5-11-6.5z"></path>
+                                </svg>
+                              </span>
+                            </div>
                           </div>
                         </button>
                       </div>
@@ -975,10 +814,16 @@ const counterpart = computed(() => {
                           <div
                             v-for="(att, i) in getAudioAttachments(msg)"
                             :key="`${msg.id}-audio-${i}`"
-                            class="rounded-4 border bg-body-tertiary p-2 p-lg-3"
+                            class="w-100 min-w-0 overflow-hidden bg-white border border-light-subtle rounded-5 p-3 shadow-sm"
                           >
-                            <div class="small text-secondary text-truncate mb-2">{{ getAttachmentName(att) }}</div>
-                            <audio class="w-100" controls preload="metadata" :src="buildUrl(att)">
+                            <div class="d-flex align-items-center gap-3 mb-3 min-w-0 overflow-hidden">
+                              <span class="flex-shrink-0 rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center border-0 shadow-sm" style="width: 40px; height: 40px;">{{ getAttachmentKindEmoji(att) }}</span>
+                              <div class="min-w-0 flex-grow-1 overflow-hidden">
+                                <div class="fw-semibold text-truncate d-block" :title="getAttachmentName(att)">{{ getAttachmentName(att) }}</div>
+                                <div class="small text-secondary text-truncate d-block">{{ getAttachmentKindLabel(att) }}</div>
+                              </div>
+                            </div>
+                            <audio class="w-100 d-block" controls preload="metadata" :src="buildUrl(att)">
                               Ваш браузер не поддерживает воспроизведение аудио.
                             </audio>
                           </div>
@@ -994,8 +839,19 @@ const counterpart = computed(() => {
                             :href="buildUrl(att)"
                             target="_blank"
                             rel="noopener"
-                            class="text-decoration-none text-primary"
-                          >📎 {{ getAttachmentName(att) }}</a>
+                            class="text-decoration-none"
+                          >
+                            <div class="d-flex align-items-center gap-3 rounded-4 border bg-body-tertiary px-3 py-2 shadow-sm">
+                              <div class="rounded-circle bg-white border d-inline-flex align-items-center justify-content-center flex-shrink-0" style="width: 42px; height: 42px;">
+                                <span>{{ getAttachmentKindEmoji(att) }}</span>
+                              </div>
+                              <div class="min-w-0 flex-grow-1">
+                                <div class="fw-semibold text-body text-truncate">{{ getAttachmentName(att) }}</div>
+                                <div class="small text-secondary text-truncate">{{ getAttachmentKindLabel(att) }}</div>
+                              </div>
+                              <span class="badge rounded-pill text-bg-light border text-secondary flex-shrink-0">Открыть</span>
+                            </div>
+                          </a>
                         </div>
                       </template>
 
@@ -1018,7 +874,7 @@ const counterpart = computed(() => {
                     </div>
 
                     <div v-if="!isOutgoingMessage(msg)" class="d-flex align-items-center justify-content-end gap-1 mt-2">
-                      <small :class="isMessageRead(msg) ? 'text-primary' : 'text-secondary'" style="font-size: 0.72rem;">{{ getReceiptIcon(msg) }}</small>
+                      <small :class="getReceipt(msg).cls" style="font-size: 0.72rem;">{{ getReceipt(msg).icon }}</small>
                       <small class="text-secondary" style="font-size: 0.72rem;">{{ messageTime(msg.createdAt) }}</small>
                       <small v-if="msg.edited || msg.editedAt" class="text-secondary" style="font-size: 0.72rem;">· изм.</small>
                     </div>
@@ -1032,6 +888,13 @@ const counterpart = computed(() => {
                   </div>
                 </div>
               </div>
+              </template>
+
+              <div v-if="scrollManager.hasNewBelow.value" class="text-center" style="position: sticky; bottom: 8px; z-index: 5;">
+                <button type="button" class="btn btn-primary btn-sm rounded-pill shadow px-3" @click="scrollManager.scrollToBottom()">
+                  ↓ Новые сообщения
+                </button>
+              </div>
             </div>
 
             <!-- Панель отправки и редактирования сообщения. -->
@@ -1043,16 +906,23 @@ const counterpart = computed(() => {
               <div v-if="composer.attachments.length" class="d-flex flex-wrap gap-2 mb-3">
                 <template v-for="(att, index) in composer.attachments" :key="`${index}-${(att && att.name) || att}`">
                   <div v-if="isImageAttachment(att)" class="position-relative overflow-hidden border border-white border-opacity-10 shadow-sm" style="width: 104px; aspect-ratio: 1 / 1; border-radius: 1rem; background: linear-gradient(180deg, rgba(15, 16, 18, 1) 0%, rgba(8, 9, 11, 1) 100%);">
-                    <img :src="getAttachmentSrc(att)" class="w-100 h-100 d-block" style="object-fit: cover;" alt="">
+                    <img :src="buildUrl(att)" class="w-100 h-100 d-block" style="object-fit: cover;" alt="">
                     <button type="button" class="btn btn-dark btn-sm position-absolute top-0 end-0 m-2 rounded-circle border-0 d-inline-flex align-items-center justify-content-center shadow-sm" style="width: 26px; height: 26px; line-height: 1; font-size: 0.8rem;" @click="removeAttachment(index)" title="Удалить изображение">×</button>
                   </div>
                   <div v-else-if="isVideoAttachment(att)" class="position-relative overflow-hidden border bg-body-tertiary rounded-3 shadow-sm" style="width: 180px; height: 120px;">
-                    <video :src="getAttachmentSrc(att)" class="w-100 h-100" controls preload="metadata" playsinline style="border-radius: .6rem; object-fit: cover; background: #000"></video>
+                    <video :src="buildUrl(att)" class="w-100 h-100" controls preload="metadata" playsinline style="border-radius: .6rem; object-fit: cover; background: #000"></video>
                     <button type="button" class="btn btn-dark btn-sm position-absolute top-0 end-0 m-2 rounded-circle border-0 d-inline-flex align-items-center justify-content-center shadow-sm" style="width: 26px; height: 26px; line-height: 1; font-size: 0.8rem;" @click="removeAttachment(index)" title="Удалить видео">×</button>
                   </div>
-                  <div v-else-if="isAudioAttachment(att)" class="rounded-4 border bg-body-tertiary p-2 d-flex align-items-center gap-2" style="min-width: 240px;">
-                    <audio :src="getAttachmentSrc(att)" controls preload="metadata" class="flex-grow-1"></audio>
-                    <button type="button" class="btn btn-sm p-0 border-0 text-secondary" @click="removeAttachment(index)" title="Удалить аудио">×</button>
+                  <div v-else-if="isAudioAttachment(att)" class="w-100 min-w-0 overflow-hidden bg-white border border-light-subtle rounded-5 p-3 shadow-sm d-flex flex-column gap-3">
+                    <div class="d-flex align-items-center gap-3 min-w-0 overflow-hidden">
+                      <span class="flex-shrink-0 rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center border-0 shadow-sm" style="width: 40px; height: 40px;">{{ getAttachmentKindEmoji(att) }}</span>
+                      <div class="min-w-0 flex-grow-1 overflow-hidden">
+                        <div class="fw-semibold text-truncate d-block" :title="getAttachmentName(att)">{{ getAttachmentName(att) }}</div>
+                        <div class="small text-secondary text-truncate d-block">{{ getAttachmentKindLabel(att) }}</div>
+                      </div>
+                      <button type="button" class="btn btn-sm btn-outline-secondary rounded-circle flex-shrink-0 d-inline-flex align-items-center justify-content-center" style="width: 28px; height: 28px;" @click="removeAttachment(index)" title="Удалить аудио">×</button>
+                    </div>
+                    <audio :src="buildUrl(att)" controls preload="metadata" class="w-100 d-block"></audio>
                   </div>
                   <div v-else class="badge text-bg-light border text-body rounded-pill d-inline-flex align-items-center gap-2 px-3 py-2">
                     <span class="text-truncate" style="max-width: 180px;">{{ getAttachmentName(att) }}</span>
@@ -1100,11 +970,11 @@ const counterpart = computed(() => {
   </div>
 
   <div
-    v-if="mediaViewerMessage && mediaViewerAttachments.length"
+    v-if="mediaViewer.message.value && mediaViewer.attachments.value.length"
     class="modal d-block"
     tabindex="-1"
     style="background: rgba(10, 15, 25, 0.68); backdrop-filter: blur(12px);"
-    @click.self="closeMediaViewer"
+    @click.self="mediaViewer.close"
   >
     <!-- Модальное окно просмотра изображения. -->
     <div class="modal-dialog modal-dialog-centered modal-xl" style="max-width: min(95vw, 95vw);">
@@ -1115,33 +985,33 @@ const counterpart = computed(() => {
             <div class="position-absolute top-0 start-0 end-0 d-flex align-items-start justify-content-between px-3 px-lg-4 pt-3 pb-0" style="z-index: 4; pointer-events: none;">
               <div style="pointer-events: auto; min-width: 0;">
                 <div class="small text-uppercase text-white-50 fw-semibold mb-1">Просмотр медиа</div>
-                <div class="h6 mb-0 text-white text-truncate">{{ getAuthorName(mediaViewerMessage) || 'Сообщение' }}</div>
+                <div class="h6 mb-0 text-white text-truncate">{{ getAuthorName(mediaViewer.message.value) || 'Сообщение' }}</div>
               </div>
               <div style="pointer-events: auto;">
-                <button type="button" class="btn-close btn-close-white" @click="closeMediaViewer" aria-label="Закрыть"></button>
+                <button type="button" class="btn-close btn-close-white" @click="mediaViewer.close" aria-label="Закрыть"></button>
               </div>
             </div>
             <!-- Слой для жестов, масштабирования и переключения кадров. -->
             <div
-              ref="mediaViewerViewport"
+              :ref="el => mediaViewer.viewport.value = el"
               class="position-absolute top-0 start-0 w-100 h-100"
               style="touch-action: none;"
-              @wheel.prevent="handleViewerWheel"
-              @click="handleViewerClick"
-              @pointerdown="handleViewerPointerDown"
-              @pointermove="handleViewerPointerMove"
-              @pointerup="handleViewerPointerEnd"
-              @pointercancel="handleViewerPointerCancel"
+              @wheel.prevent="mediaViewer.onWheel"
+              @click="mediaViewer.onClick"
+              @pointerdown="mediaViewer.onPointerDown"
+              @pointermove="mediaViewer.onPointerMove"
+              @pointerup="mediaViewer.onPointerEnd"
+              @pointercancel="mediaViewer.onPointerCancel"
             ></div>
 
             <!-- Текущее медиа в увеличенном просмотре. -->
-            <template v-if="mediaViewerCurrentUrl">
+            <template v-if="mediaViewer.currentUrl.value">
               <img
-                v-if="!mediaViewerCurrentIsVideo"
-                :src="mediaViewerCurrentUrl"
+                v-if="!mediaViewer.currentIsVideo.value"
+                :src="mediaViewer.currentUrl.value"
                 class="position-absolute top-50 start-50 d-block"
                 :style="[
-                  mediaViewerImageStyle,
+                  mediaViewer.imageStyle.value,
                   {
                     maxWidth: '100%',
                     maxHeight: '100%',
@@ -1161,10 +1031,10 @@ const counterpart = computed(() => {
 
               <video
                 v-else
-                :src="mediaViewerCurrentUrl"
+                :src="mediaViewer.currentUrl.value"
                 class="position-absolute top-50 start-50 d-block"
                 :style="[
-                  mediaViewerImageStyle,
+                  mediaViewer.imageStyle.value,
                   {
                     maxWidth: '100%',
                     maxHeight: '100%',
@@ -1187,8 +1057,8 @@ const counterpart = computed(() => {
               type="button"
               class="btn position-absolute top-0 start-0 bottom-0 border-0 p-0 d-flex align-items-center justify-content-start"
               style="width: clamp(72px, 22%, 180px); z-index: 2; background: linear-gradient(90deg, rgba(10, 15, 25, 0.32), rgba(10, 15, 25, 0));"
-              @click="previousMedia"
-              :disabled="mediaViewerIndex === 0"
+              @click="mediaViewer.previous"
+              :disabled="mediaViewer.index.value === 0"
               aria-label="Предыдущее"
             >
               <span class="btn btn-dark border-0 rounded-circle shadow-sm d-inline-flex align-items-center justify-content-center ms-3 ms-lg-4" style="width: 42px; height: 42px; pointer-events: none;">‹</span>
@@ -1199,8 +1069,8 @@ const counterpart = computed(() => {
               type="button"
               class="btn position-absolute top-0 end-0 bottom-0 border-0 p-0 d-flex align-items-center justify-content-end"
               style="width: clamp(72px, 22%, 180px); z-index: 2; background: linear-gradient(270deg, rgba(10, 15, 25, 0.32), rgba(10, 15, 25, 0));"
-              @click="nextMedia"
-              :disabled="mediaViewerIndex === mediaViewerAttachments.length - 1"
+              @click="mediaViewer.next"
+              :disabled="mediaViewer.index.value === mediaViewer.attachments.value.length - 1"
               aria-label="Следующее"
             >
               <span class="btn btn-dark border-0 rounded-circle shadow-sm d-inline-flex align-items-center justify-content-center me-3 me-lg-4" style="width: 42px; height: 42px; pointer-events: none;">›</span>
@@ -1209,19 +1079,19 @@ const counterpart = computed(() => {
             <!-- Нижняя галерея миниатюр для быстрого выбора медиа. -->
             <div class="position-absolute start-0 end-0 bottom-0 p-3 p-lg-4" style="z-index: 3; pointer-events: none;">
               <div class="d-flex align-items-center gap-3 rounded-5 border border-white border-opacity-10 bg-dark bg-opacity-50 px-3 py-3 shadow-lg mx-auto" style="max-width: min(940px, 100%); backdrop-filter: blur(18px); pointer-events: auto;">
-                <div class="badge bg-white text-dark rounded-4 flex-shrink-0 px-3 py-2">{{ mediaViewerIndex + 1 }} / {{ mediaViewerAttachments.length }}</div>
+                <div class="badge bg-white text-dark rounded-4 flex-shrink-0 px-3 py-2">{{ mediaViewer.index.value + 1 }} / {{ mediaViewer.attachments.value.length }}</div>
                 <div class="d-flex align-items-center justify-content-center flex-nowrap gap-2 overflow-x-auto overflow-y-hidden flex-grow-1 min-w-0 py-1" style="scrollbar-width: thin; white-space: nowrap;">
                   <button
-                    v-for="(att, index) in mediaViewerAttachments"
-                    :key="`${mediaViewerMessage?.id}-${att}-${index}`"
+                    v-for="(att, idx) in mediaViewer.attachments.value"
+                    :key="`${mediaViewer.message.value?.id}-${att}-${idx}`"
                     type="button"
                     class="p-0 border-0 rounded-4 overflow-hidden flex-shrink-0 shadow-sm"
-                    :class="index === mediaViewerIndex ? 'border border-2 border-primary' : 'border border-white border-opacity-10'"
-                    @click="mediaViewerIndex = index"
+                    :class="idx === mediaViewer.index.value ? 'border border-2 border-primary' : 'border border-white border-opacity-10'"
+                    @click="mediaViewer.index.value = idx"
                     style="width: 66px; height: 66px; background: linear-gradient(180deg, rgba(15, 16, 18, 1) 0%, rgba(8, 9, 11, 1) 100%);"
                   >
                     <img
-                      v-if="!isVideoAttachment(att) && String(att?.type || '').toLowerCase() !== 'video'"
+                      v-if="!isVideoAttachment(att)"
                       :src="buildUrl(att)"
                       class="w-100 h-100 d-block"
                       style="object-fit: cover;"

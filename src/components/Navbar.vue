@@ -1,15 +1,18 @@
 <script setup>
-import { onMounted, onUnmounted, watch, ref } from 'vue'
+import { computed, onMounted, onUnmounted, watch, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '../stores/userStore'
+import { useChatStore } from '../stores/chatStore'
 import { useNotificationsStore } from '../stores/notificationsStore'
 
 const userStore = useUserStore()
+const chatStore = useChatStore()
 const notificationsStore = useNotificationsStore()
 const router = useRouter()
 
 const openGroup = ref(null)
 const notificationsToggle = ref(null)
+const unreadMessagesCount = computed(() => chatStore.conversations.reduce((sum, conv) => sum + (Number(conv.unreadCount) || 0), 0))
 
 function toggleGroup(adId) {
   const key = String(adId ?? 'other')
@@ -53,16 +56,23 @@ function handleLogout() {
   router.push('/login')
 }
 
+async function syncChatConversations() {
+  if (!userStore.token) return
+  await chatStore.getConversations().catch(() => {})
+}
+
 watch(
   () => userStore.token,
   (token) => {
     if (token) notificationsStore.connect()
     else notificationsStore.disconnect()
+    if (token) syncChatConversations()
   }
 )
 
 onMounted(() => {
   if (userStore.token) notificationsStore.connect()
+  syncChatConversations()
 })
 
 onUnmounted(() => {
@@ -109,7 +119,16 @@ const typeLabels = {
             <router-link class="nav-link px-3 rounded-pill" to="/favorites">Избранное</router-link>
           </li>
           <li class="nav-item" v-if="userStore.token">
-            <router-link class="nav-link px-3 rounded-pill" to="/chat">Чаты</router-link>
+            <router-link class="nav-link px-3 rounded-pill position-relative d-inline-flex align-items-center" to="/chat">
+              <span>Чаты</span>
+              <span
+                v-if="unreadMessagesCount"
+                class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger"
+                style="font-size:0.65rem;min-width:1.2rem;padding:0.22rem 0.35rem;"
+              >
+                {{ unreadMessagesCount > 99 ? '99+' : unreadMessagesCount }}
+              </span>
+            </router-link>
           </li>
           <li class="nav-item dropdown" v-if="userStore.isAdmin">
             <a class="nav-link px-3 rounded-pill dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
