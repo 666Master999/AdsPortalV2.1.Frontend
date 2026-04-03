@@ -413,7 +413,6 @@ async function initChat() {
     if (prevConvId) await presenceStore.leaveGroup(prevConvId)
     unreadDividerId.value = null
     scrollManager.firstUnreadId.value = null
-    readTracker.flushRead()
     readTracker.disconnectObserver()
     mediaViewer.close()
     for (const m of chatStore.messages || []) cleanupMessagePreviews(m)
@@ -732,7 +731,7 @@ function onTextareaInput(e) {
                   <small class="text-primary fw-semibold flex-shrink-0">Новые сообщения</small>
                   <div class="flex-grow-1" style="border-top: 2px solid var(--bs-primary);"></div>
                 </div>
-                <div :id="'message-' + msg.id" class="d-flex mb-3" :class="isMine(msg) ? 'justify-content-end' : 'justify-content-start'">
+                <div :id="'message-' + msg.id" :data-message-id="msg.id" class="d-flex mb-3" :class="isMine(msg) ? 'justify-content-end' : 'justify-content-start'">
                 <!-- Аватар второго участника. -->
                 <div v-if="!isMine(msg)" class="rounded-circle flex-shrink-0 me-2 align-self-end overflow-hidden bg-secondary-subtle border d-flex align-items-center justify-content-center text-secondary" style="width: 30px; height: 30px; font-size: 0.75rem; font-weight: 600;">
                   <img v-if="getAuthorAvatar(msg)" v-intersect-lazy="getAuthorAvatar(msg)" class="w-100 h-100" style="object-fit: cover;" alt="">

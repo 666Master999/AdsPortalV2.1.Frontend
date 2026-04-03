@@ -4,19 +4,18 @@ import { useChatStore } from '../stores/chatStore'
 const VISIBILITY_DELAY = 300     // ms message must stay in view before counting
 const VISIBILITY_THRESHOLD = 0.6 // 60% of message must be visible
 
-const NEAR_BOTTOM_THRESHOLD = 200 // px from bottom = "reading zone"
+const NEAR_BOTTOM_THRESHOLD = 100 // px from bottom = "reading zone"
+const READ_DEBOUNCE_MS = 150
 
 export function useReadTracker(messagesContainer, shouldTrackMessage = () => true) {
   const chatStore = useChatStore()
 
-  // candidateVisible: started intersecting, timer pending
-  const candidateVisible = new Set()
-  // confirmedVisible: stayed visible long enough — these are actually "read"
-  const confirmedVisible = new Set()
+  // numbers only
+  const visibleMessageIds = new Set()
+  let lastSentId = null
+  const maxVisibleId = ref(null)
 
   const visibilityTimers = new Map()
-  const justMounted = new Set()
-  const maxVisibleId = ref(null)
   let observer = null
   let debounceTimer = null
   const observedIds = new Set()
@@ -27,45 +26,78 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
     return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_THRESHOLD
   }
 
-  function trackMounted(msgId) {
-    justMounted.add(msgId)
-    setTimeout(() => justMounted.delete(msgId), 300)
+  function isActiveConversation() {
+    return Boolean(chatStore.currentConversation?.id)
   }
 
-  function getConfirmedMaxId() {
-    if (!confirmedVisible.size) return null
-    const sorted = [...confirmedVisible]
-      .map(id => Number(id))
-      .filter(n => Number.isFinite(n) && n > 0)
-      .sort((a, b) => b - a)
-    return sorted[0] ?? null
+  function computeMaxVisible() {
+    if (!visibleMessageIds.size) return null
+    let max = null
+    for (const v of visibleMessageIds) {
+      const n = Number(v)
+      if (!Number.isFinite(n) || n <= 0) continue
+      if (max === null || n > max) max = n
+    }
+    return max
   }
 
-  function tryMarkRead() {
-    // Guard: only mark read when user is near the bottom of the conversation
-    if (!isNearBottom()) return
+  function canSendRead(nextId) {
+    if (!nextId) return false
+    if (typeof document !== 'undefined' && document.hidden) return false
+    if (!isActiveConversation()) return false
+    if (!isNearBottom()) return false
 
+    const prevSent = Number(lastSentId ?? 0)
+    if (prevSent && nextId <= prevSent) return false
+
+    const currentMyLast = Number(chatStore.myLastSeenMessageId ?? 0)
+    if (nextId <= currentMyLast) return false
+
+    return true
+  }
+
+  function sendRead(messageId) {
     const convId = chatStore.currentConversation?.id
-    if (!convId) return
+    const msgId = Number(messageId)
+    if (!convId || !msgId) return
 
-    const maxId = getConfirmedMaxId()
-    if (maxId == null) return
+    // Send via presenceStore (lazy import to avoid cycles)
+    import('../stores/presenceStore').then(({ usePresenceStore }) => {
+      try { usePresenceStore().sendRead(convId, msgId) } catch {}
+    }).catch(() => {})
 
-    const current = chatStore.myLastSeenMessageId != null ? Number(chatStore.myLastSeenMessageId) : 0
-    if (maxId <= current) return
-
-    chatStore.markRead(convId, maxId)
-    maxVisibleId.value = maxId
+    // Optimistic local update (only forward)
+    try {
+      const cid = String(convId)
+      const prev = Number(chatStore.myLastSeenByConversation.get(cid) ?? 0)
+      if (msgId > prev) {
+        chatStore.myLastSeenByConversation.set(cid, msgId)
+        chatStore.unreadByConversation.set(cid, 0)
+        const conv = chatStore.getConversationById(cid)
+        if (conv) { conv.unreadCount = 0; conv.hasUnread = false }
+      }
+    } catch {}
   }
 
-  function scheduleRead() {
+  function scheduleReadCheck() {
     if (debounceTimer) clearTimeout(debounceTimer)
-    debounceTimer = setTimeout(tryMarkRead, 500)
+    debounceTimer = setTimeout(() => {
+      debounceTimer = null
+      const nextId = computeMaxVisible()
+      if (!canSendRead(nextId)) return
+      sendRead(nextId)
+      lastSentId = nextId
+      maxVisibleId.value = nextId
+    }, READ_DEBOUNCE_MS)
   }
 
   function flushRead() {
     if (debounceTimer) { clearTimeout(debounceTimer); debounceTimer = null }
-    tryMarkRead()
+    const nextId = computeMaxVisible()
+    if (!canSendRead(nextId)) return
+    sendRead(nextId)
+    lastSentId = nextId
+    maxVisibleId.value = nextId
   }
 
   function setupObserver() {
@@ -73,41 +105,36 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
     maxVisibleId.value = null
     const root = messagesContainer.value
     if (!root) return
+
     observer = new IntersectionObserver((entries) => {
       for (const entry of entries) {
-        const rawId = entry.target.id?.replace('message-', '')
+        // prefer data attribute, fallback to id
+        const rawId = entry.target.dataset?.messageId ?? entry.target.id?.replace('message-', '')
         if (!rawId) continue
-        const message = chatStore.messages.find(item => String(item.id) === String(rawId))
+        const idNum = Number(rawId)
+        if (!Number.isFinite(idNum) || idNum <= 0) continue
+        const message = chatStore.messages.find(item => Number(item.id) === idNum)
         if (!message) continue
         if (!shouldTrackMessage(message)) continue
 
         if (entry.isIntersecting) {
-          // Ignore first-render burst
-          if (justMounted.has(rawId)) continue
-
-          candidateVisible.add(rawId)
-
-          visibilityTimers.set(rawId, setTimeout(() => {
-            visibilityTimers.delete(rawId)
-            // Only confirm if still in candidate set (user didn't scroll away)
-            if (candidateVisible.has(rawId)) {
-              confirmedVisible.add(rawId)
-              scheduleRead()
-            }
-          }, VISIBILITY_DELAY))
+          // Start short timer to confirm visibility
+          if (visibilityTimers.has(idNum)) continue
+          const t = setTimeout(() => {
+            visibilityTimers.delete(idNum)
+            visibleMessageIds.add(idNum)
+            scheduleReadCheck()
+          }, VISIBILITY_DELAY)
+          visibilityTimers.set(idNum, t)
         } else {
-          // User scrolled away — cancel timer and remove from both sets
-          candidateVisible.delete(rawId)
-          confirmedVisible.delete(rawId)
-
-          const timer = visibilityTimers.get(rawId)
-          if (timer !== undefined) {
-            clearTimeout(timer)
-            visibilityTimers.delete(rawId)
-          }
+          // left viewport — cancel pending timer and remove
+          const t = visibilityTimers.get(idNum)
+          if (t !== undefined) { clearTimeout(t); visibilityTimers.delete(idNum) }
+          visibleMessageIds.delete(idNum)
         }
       }
     }, { root, threshold: VISIBILITY_THRESHOLD })
+
     observeMessages()
   }
 
@@ -117,10 +144,9 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
       if (!shouldTrackMessage(msg)) continue
       const msgId = String(msg.id)
       if (observedIds.has(msgId)) continue
-      const el = document.getElementById(`message-${msgId}`)
+      const el = document.querySelector(`[data-message-id="${msgId}"]`) || document.getElementById(`message-${msgId}`)
       if (el) {
         observedIds.add(msgId)
-        trackMounted(msgId)
         observer.observe(el)
       }
     }
@@ -133,14 +159,13 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
     }
     for (const timer of visibilityTimers.values()) clearTimeout(timer)
     visibilityTimers.clear()
-    candidateVisible.clear()
-    confirmedVisible.clear()
-    justMounted.clear()
+    visibleMessageIds.clear()
     if (observer) { observer.disconnect(); observer = null }
     observedIds.clear()
   }
 
   function cleanup() {
+    // do not force-send on init; allow explicit flush on unmount
     flushRead()
     disconnectObserver()
     maxVisibleId.value = null

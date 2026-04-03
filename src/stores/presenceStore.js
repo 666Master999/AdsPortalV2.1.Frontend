@@ -3,6 +3,7 @@ import { ref, reactive } from 'vue'
 import * as signalR from '@microsoft/signalr'
 import { useTypingStore } from './typingStore'
 import { getApiBaseUrl } from '../config/apiBase'
+import { createSignalRConnection, onSafe } from '../composables/useSignalR'
 
 const apiBase = getApiBaseUrl()
 
@@ -58,6 +59,12 @@ export const usePresenceStore = defineStore('presence', () => {
     await connection.invoke('JoinGroup', Number(activeConversationGroupId)).catch(() => {})
   }
 
+  async function joinUserGroup() {
+    const uid = _getCurrentUserId()
+    if (!uid || !isConnected()) return
+    await connection.invoke('JoinUserGroup', Number(uid)).catch(() => {})
+  }
+
   function _getCurrentUserId() {
     try {
       const su = JSON.parse(localStorage.getItem('user') || 'null')
@@ -81,37 +88,81 @@ export const usePresenceStore = defineStore('presence', () => {
     }
     if (connection) return
 
-    connection = new signalR.HubConnectionBuilder()
-      .withUrl(`${apiBase}/hubs/online`, {
-        accessTokenFactory: () => localStorage.getItem('token'),
-      })
-      .withAutomaticReconnect()
-      .configureLogging(signalR.LogLevel.Warning)
-      .build()
+    connection = createSignalRConnection()
 
-    connection.on('chat:onlineUsers', (payload) => {
-      const cid = String(payload?.conversationId ?? '')
-      if (!cid) return
-      const ids = (payload?.users ?? [])
-        .map(u => String(u.userId ?? u.id ?? ''))
-        .filter(Boolean)
+    // chat:onlineUsers — full replace for a conversation
+    onSafe(connection, 'chat:onlineUsers', (payload) => {
+      if (!payload || typeof payload !== 'object') return false
+      const cid = String(payload.conversationId ?? '')
+      if (!cid) return false
+      if (!Array.isArray(payload.users)) return false
+      if (payload.users.some(u => !u || (typeof u.userId === 'undefined' || u.userId === null))) return false
+      return true
+    }, (payload) => {
+      const cid = String(payload.conversationId)
+      const ids = payload.users.map(u => String(u.userId))
       onlineUsersByConversation.set(cid, new Set(ids))
     })
 
-    connection.on('chat:typing', (payload) => {
-      const cid = String(payload?.conversationId ?? '')
-      if (!cid || cid !== activeConversationGroupId) return
+    // chat:typing — per-conversation typing events; front-end handles timeout
+    onSafe(connection, 'chat:typing', (payload) => {
+      if (!payload || typeof payload !== 'object') return false
+      const cid = String(payload.conversationId ?? '')
+      const uid = String(payload.userId ?? '')
+      const userName = payload.userName
+      if (!cid || !uid || typeof userName !== 'string') return false
+      return true
+    }, (payload) => {
+      const cid = String(payload.conversationId)
+      if (cid !== activeConversationGroupId) return
       useTypingStore().applyTypingEvent(payload, _getCurrentUserId())
     })
 
-    connection.on('chat:read', (payload) => {
-      const cid = String(payload?.conversationId ?? '')
-      const uid = String(payload?.userId ?? '')
-      const msgId = Number(payload?.lastSeenMessageId ?? payload?.messageId ?? 0)
-      if (!cid || !uid || !msgId) return
-      // Lazy import to avoid circular dep
+    // chat:read — notify that user read up to lastSeenMessageId
+    onSafe(connection, 'chat:read', (payload) => {
+      if (!payload || typeof payload !== 'object') return false
+      const cid = String(payload.conversationId ?? '')
+      const uid = String(payload.userId ?? '')
+      const msgId = Number(payload.lastSeenMessageId ?? 0)
+      if (!cid || !uid || !msgId) return false
+      return true
+    }, (payload) => {
+      const cid = String(payload.conversationId)
+      const uid = String(payload.userId)
+      const msgId = Number(payload.lastSeenMessageId)
       import('./chatStore').then(({ useChatStore }) => {
         useChatStore().applyRemoteRead(cid, uid, msgId)
+      })
+    })
+
+    // chat:newMessage — incoming message for a conversation
+    onSafe(connection, 'chat:newMessage', (payload) => {
+      if (!payload || typeof payload !== 'object') return false
+      const cid = String(payload.conversationId ?? '')
+      const message = payload.message
+      if (!cid || !message || typeof message !== 'object' || !('id' in message)) return false
+      return true
+    }, (payload) => {
+      import('./chatStore').then(({ useChatStore }) => {
+        useChatStore().applyIncomingMessage(payload)
+      })
+    })
+
+    // chat:conversationUpdated — user-targeted conversation preview/update
+    onSafe(connection, 'chat:conversationUpdated', (payload) => {
+      if (!payload || typeof payload !== 'object') return false
+      const cid = String(payload.conversationId ?? '')
+      const conversation = payload.conversation
+      if (!cid || !conversation || typeof conversation !== 'object') return false
+      return true
+    }, (payload) => {
+      import('./chatStore').then(({ useChatStore }) => {
+        const store = useChatStore()
+        if (typeof store.applyConversationUpdated === 'function') {
+          store.applyConversationUpdated(payload)
+        } else {
+          console.warn('[signalr] conversationUpdated received but chatStore has no applyConversationUpdated handler')
+        }
       })
     })
 

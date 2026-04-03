@@ -261,13 +261,7 @@ export const useChatStore = defineStore('chat', () => {
       if (!isNaN(numId) && (lastKnownId.value === null || numId > lastKnownId.value)) {
         lastKnownId.value = numId
       }
-      // If incoming (not mine), send Read via hub and update local state
-      if (!isFromMe) {
-        const numMsgId = Number(normalized.id)
-        if (!isNaN(numMsgId)) {
-          _sendReadForActiveConversation(cid, numMsgId)
-        }
-      }
+      // NOTE: do NOT send read here eagerly — read sending is handled by useReadTracker
     } else {
       // Not active conversation
       const numId = Number(normalized.id)
@@ -320,9 +314,8 @@ export const useChatStore = defineStore('chat', () => {
 
   // Internal: send Read via OnlineHub (lazy import to avoid circular dep)
   function _sendReadForActiveConversation(cid, msgId) {
-    import('./presenceStore').then(({ usePresenceStore }) => {
-      usePresenceStore().sendRead(cid, msgId)
-    })
+    // Sending to presence hub is now centralized in useReadTracker.
+    // Keep optimistic local update here but do NOT call presenceStore.sendRead()
     // Update local myLastSeen immediately (optimistic, only forward)
     const prev = Number(myLastSeenByConversation.get(cid) ?? 0)
     if (msgId > prev) {
