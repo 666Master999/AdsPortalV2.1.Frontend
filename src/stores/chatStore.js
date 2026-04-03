@@ -1,5 +1,5 @@
 import { defineStore } from 'pinia'
-import { ref } from 'vue'
+import { ref, reactive, computed } from 'vue'
 import { getApiBaseUrl } from '../config/apiBase'
 
 const apiBase = getApiBaseUrl()
@@ -27,35 +27,86 @@ function normalizeConversation(conversation) {
   if (!conversation || typeof conversation !== 'object') return conversation
 
   const id = conversation.id ?? conversation.conversationId
+  const companion = conversation.companion ?? conversation.opponent ?? null
+  const ad = conversation.ad ?? null
+  const lastMessage = conversation.lastMessage ?? conversation.last_message ?? null
   const unreadCount = conversation.unreadCount
     ?? conversation.unreadMessagesCount
     ?? (conversation.hasUnread ? 1 : 0)
+  const lastMessageAt = conversation.lastMessageAt
+    ?? conversation.last_message_at
+    ?? conversation.lastMessageTimestamp
+    ?? lastMessage?.createdAt
+    ?? null
+  const isClosed = conversation.isClosed ?? conversation.closed ?? false
+  const isMuted = conversation.isMuted ?? conversation.muted ?? false
+  const isArchived = conversation.isArchived ?? conversation.archived ?? false
 
   return {
     ...conversation,
     id,
-    adId: conversation.adId ?? conversation.relatedAdId ?? conversation.targetAdId ?? null,
-    title: conversation.title || conversation.name || `Диалог #${id}`,
-    last_message_at: conversation.last_message_at ?? conversation.lastMessageAt ?? conversation.lastMessageTimestamp ?? null,
-    last_message_text: conversation.last_message_text ?? conversation.lastMessageText ?? null,
+    companion,
+    ad: ad ?? (conversation.adId != null ? { id: conversation.adId } : null),
+    lastMessage,
+    firstUnreadMessageId: conversation.firstUnreadMessageId ?? conversation.firstUnreadMessage ?? null,
+    lastMessageAt,
     unreadCount,
-    muted: conversation.muted ?? conversation.isMuted ?? false,
-    archived: conversation.archived ?? conversation.isArchived ?? false,
+    isClosed,
+    isMuted,
+    isArchived,
+    totalMessagesCount: conversation.totalMessagesCount ?? null,
+    companionId: companion?.id ?? null,
+    companionName: companion?.name ?? null,
+    companionAvatar: companion?.avatar ?? null,
+    adId: conversation.adId ?? ad?.id ?? conversation.relatedAdId ?? conversation.targetAdId ?? null,
+    lastMessageType: lastMessage?.type ?? conversation.lastMessageType ?? conversation.last_message_type ?? null,
+    lastMessageText: lastMessage?.text ?? conversation.lastMessageText ?? conversation.last_message_text ?? '',
+    last_message_at: lastMessageAt,
+    last_message_text: lastMessage?.text ?? conversation.lastMessageText ?? conversation.last_message_text ?? null,
+    muted: isMuted,
+    archived: isArchived,
   }
 }
 
-export function normalizeMessage(message) {
-  if (!message || typeof message !== 'object') return message
+// Unwrap the backend contract { conversationId, message } → plain message with conversationId merged in.
+function unwrapMsg(res) {
+  if (
+    res &&
+    typeof res === 'object' &&
+    res.message &&
+    typeof res.message === 'object' &&
+    'id' in res.message
+  ) {
+    return { ...res.message, conversationId: res.conversationId ?? res.message.conversationId }
+  }
+  return res
+}
 
-  const attachments = Array.isArray(message.attachments)
-    ? message.attachments.filter(Boolean)
+export function normalizeMessage(message) {
+  if (!message || typeof message !== 'object') return null
+
+  const m = unwrapMsg(message)
+  if (!m || typeof m !== 'object') return null
+
+  const id = m.id != null ? String(m.id) : null
+  if (!id) return null
+
+  const conversationId = String(m.conversationId ?? m.conversation?.id ?? '')
+
+  const attachments = Array.isArray(m.attachments)
+    ? m.attachments.filter(Boolean)
     : []
 
   return {
-    ...message,
-    text: message.text ?? null,
+    ...m,
+    id,
+    conversationId,
+    text: m.text ?? '',
+    authorId: String(m.authorId ?? m.senderId ?? m.author?.id ?? m.sender?.id ?? m.userId ?? ''),
+    createdAt: m.createdAt ?? new Date().toISOString(),
     attachments,
-    replyToMessageId: message.replyToMessageId ?? message.reply_to_message_id ?? null,
+    status: m.status ?? 'sent',
+    replyToMessageId: m.replyToMessageId ?? m.reply_to_message_id ?? null,
   }
 }
 
@@ -70,36 +121,27 @@ function getConversationListPayload(data) {
 function decorateConversation(conversation, ad = null) {
   const n = normalizeConversation(conversation)
   if (!n) return n
-  const opponent = n.opponent ?? null
-  const counterpartName = opponent?.userName ?? opponent?.userLogin ?? n.counterpartName ?? 'Собеседник'
-  const adTitle = ad?.title ?? n.ad?.title ?? n.adTitle ?? null
+  const companion = n.companion ?? null
+  const mergedAd = ad ?? n.ad ?? null
+  const adTitle = mergedAd?.title ?? null
+  const companionName = companion?.name ?? null
   return {
     ...n,
-    adTitle,
-    me: n.me ?? n.user ?? null,
-    opponent,
-    counterpartId: opponent?.id ?? null,
-    counterpartName,
-    counterpartLastActivityAt: opponent?.lastActivityAt ?? null,
-    lastMessageType: n.lastMessageType ?? n.last_message_type ?? n.type ?? 0,
-    lastMessageText: n.lastMessageText ?? n.last_message_text ?? '',
-    roleLabel: 'Собеседник',
-    displayTitle: n.title ?? counterpartName ?? 'нет данных',
-    displaySubtitle: `Собеседник: ${counterpartName ?? 'нет данных'}`,
-    displayMeta: (n.adId ? `Объявление #${n.adId}` : 'нет данных') + (adTitle ? ` · ${adTitle}` : ''),
+    ad: mergedAd,
+    companion,
+    companionId: companion?.id ?? null,
+    companionName,
+    companionAvatar: companion?.avatar ?? null,
+    lastMessageType: n.lastMessage?.type ?? n.lastMessageType ?? n.last_message_type ?? null,
+    lastMessageText: n.lastMessage?.text ?? n.lastMessageText ?? n.last_message_text ?? '',
+    displayTitle: companionName ?? adTitle ?? null,
+    displayMeta: mergedAd?.id ? `Объявление #${mergedAd.id}${adTitle ? ` · ${adTitle}` : ''}` : null,
   }
 }
 
-function upsertMessage(list, message) {
-  if (!message) return
-  const idx = list.findIndex(item => String(item.id) === String(message.id))
-  if (idx === -1) list.push(message)
-  else list[idx] = { ...list[idx], ...message }
-}
-
-function updateMessage(list, messageId, patch) {
-  const idx = list.findIndex(m => String(m.id) === String(messageId))
-  if (idx !== -1) list[idx] = { ...list[idx], ...patch }
+function sortById(a, b) {
+  const ai = Number(a.id), bi = Number(b.id)
+  return (Number.isFinite(ai) ? ai : Infinity) - (Number.isFinite(bi) ? bi : Infinity)
 }
 
 function computeLastKnownId(msgs) {
@@ -113,15 +155,235 @@ function computeLastKnownId(msgs) {
 
 export const useChatStore = defineStore('chat', () => {
   const conversations = ref([])
+
+  // Per §4.1 — per-conversation Maps are the canonical state
+  // myLastSeenByConversation: Map<cid(string), number>
+  // otherLastSeenByConversation: Map<cid(string), number>
+  // unreadByConversation: Map<cid(string), number>
+  const myLastSeenByConversation = reactive(new Map())
+  const otherLastSeenByConversation = reactive(new Map())
+  const unreadByConversation = reactive(new Map())
+
+  // badge = sum of all unread counts
+  const unreadCount = computed(() => {
+    let total = 0
+    for (const v of unreadByConversation.values()) total += (Number(v) || 0)
+    return total
+  })
+
   const currentConversation = ref(null)
-  const messages = ref([])
+  const messagesMap = reactive(new Map())
+  const messages = computed(() => Array.from(messagesMap.values()).sort(sortById))
+  const currentConversationId = ref(null)
   const hasMore = ref(false)
   const isLoading = ref(false)
   const error = ref(null)
   const lastKnownId = ref(null)
   const anchorMessageId = ref(null)
-  const myLastSeenMessageId = ref(null)
-  const otherLastSeenMessageId = ref(null)
+
+  // Dedup set for realtime messages (30s window)
+  const _seenMessageIds = new Map()
+
+  function _isDuplicate(msgId) {
+    const id = String(msgId ?? '')
+    if (!id) return false
+    const now = Date.now()
+    for (const [k, t] of _seenMessageIds) {
+      if (now - t > 30000) _seenMessageIds.delete(k)
+    }
+    if (_seenMessageIds.has(id)) return true
+    _seenMessageIds.set(id, now)
+    return false
+  }
+
+  // Convenience getters for current conversation read state
+  const myLastSeenMessageId = computed(() => myLastSeenByConversation.get(String(currentConversationId.value ?? '')) ?? null)
+  const otherLastSeenMessageId = computed(() => otherLastSeenByConversation.get(String(currentConversationId.value ?? '')) ?? null)
+
+  function _getCurrentUserId() {
+    try {
+      const stored = JSON.parse(localStorage.getItem('user') || 'null')
+      if (stored?.id || stored?.userId) return String(stored.id || stored.userId)
+    } catch {}
+    const payload = parseJwt(localStorage.getItem('token'))
+    return String(payload?.sub || payload?.id || payload?.userId || '')
+  }
+
+  function getConversationById(conversationId) {
+    const cid = String(conversationId ?? '')
+    if (!cid) return null
+    return conversations.value.find(item => String(item.id) === cid) ||
+      (String(currentConversation.value?.id ?? '') === cid ? currentConversation.value : null)
+  }
+
+  function moveConversationToTop(conversationId) {
+    const cid = String(conversationId ?? '')
+    if (!cid) return null
+    const index = conversations.value.findIndex(item => String(item.id) === cid)
+    if (index <= 0) return index === 0 ? conversations.value[0] : null
+    const [conversation] = conversations.value.splice(index, 1)
+    conversations.value.unshift(conversation)
+    return conversation
+  }
+
+  function updateConversationPreview(conversation, message) {
+    if (!conversation || !message) return
+    conversation.lastMessage = message
+    conversation.lastMessageType = message.type ?? conversation.lastMessageType ?? null
+    conversation.lastMessageText = message.text ?? conversation.lastMessageText ?? null
+    conversation.lastMessageAt = message.createdAt ?? conversation.lastMessageAt ?? null
+    conversation.firstUnreadMessageId = conversation.firstUnreadMessageId ?? null
+    conversation.last_message_at = conversation.lastMessageAt
+    conversation.last_message_text = conversation.lastMessageText
+  }
+
+  // Called by notificationsStore on chat:message event
+  function applyIncomingMessage(rawMessage) {
+    const normalized = normalizeMessage(rawMessage)
+    if (!normalized) return null
+
+    const cid = String(normalized.conversationId ?? '')
+    if (!cid) return null
+
+    // Dedup by message id
+    if (_isDuplicate(normalized.id)) return normalized
+
+    const activeCid = String(currentConversationId.value ?? '')
+    const myId = _getCurrentUserId()
+    const isFromMe = normalized.authorId && normalized.authorId === myId
+    const isActive = activeCid === cid
+
+    // Append to messages if this is the active conversation
+    if (isActive) {
+      setMessage(normalized)
+      // Advance lastKnownId
+      const numId = Number(normalized.id)
+      if (!isNaN(numId) && (lastKnownId.value === null || numId > lastKnownId.value)) {
+        lastKnownId.value = numId
+      }
+      // If incoming (not mine), send Read via hub and update local state
+      if (!isFromMe) {
+        const numMsgId = Number(normalized.id)
+        if (!isNaN(numMsgId)) {
+          _sendReadForActiveConversation(cid, numMsgId)
+        }
+      }
+    } else {
+      // Not active conversation
+      const numId = Number(normalized.id)
+      // Unread: only increment for incoming messages (not mine)
+      if (!isFromMe) {
+        const prev = Number(unreadByConversation.get(cid) ?? 0)
+        unreadByConversation.set(cid, prev + 1)
+      }
+      // Advance lastKnownId for this conversation regardless
+      if (!isNaN(numId)) {
+        // We don't track per-conv lastKnownId separately; just skip for non-active
+      }
+    }
+
+    // Update conversation list preview
+    const conversation = getConversationById(cid)
+    if (conversation) {
+      updateConversationPreview(conversation, normalized)
+      // Sync unreadCount field on conversation object from our Map
+      const unread = Number(unreadByConversation.get(cid) ?? 0)
+      conversation.unreadCount = unread
+      conversation.hasUnread = unread > 0
+      moveConversationToTop(cid)
+    }
+    if (String(currentConversation.value?.id ?? '') === cid) {
+      updateConversationPreview(currentConversation.value, normalized)
+    }
+
+    return normalized
+  }
+
+  // Called by presenceStore on chat:read event (other party read something)
+  function applyRemoteRead(conversationId, userId, lastSeenMessageId) {
+    const cid = String(conversationId ?? '')
+    const uid = String(userId ?? '')
+    const msgId = Number(lastSeenMessageId)
+    if (!cid || !uid || !msgId) return
+
+    const myId = _getCurrentUserId()
+    if (uid === myId) {
+      // This is our own read confirmed by server — advance myLastSeen
+      const prev = Number(myLastSeenByConversation.get(cid) ?? 0)
+      if (msgId > prev) myLastSeenByConversation.set(cid, msgId)
+    } else {
+      // Other party read — advance otherLastSeen (only forward)
+      const prev = Number(otherLastSeenByConversation.get(cid) ?? 0)
+      if (msgId > prev) otherLastSeenByConversation.set(cid, msgId)
+    }
+  }
+
+  // Internal: send Read via OnlineHub (lazy import to avoid circular dep)
+  function _sendReadForActiveConversation(cid, msgId) {
+    import('./presenceStore').then(({ usePresenceStore }) => {
+      usePresenceStore().sendRead(cid, msgId)
+    })
+    // Update local myLastSeen immediately (optimistic, only forward)
+    const prev = Number(myLastSeenByConversation.get(cid) ?? 0)
+    if (msgId > prev) {
+      myLastSeenByConversation.set(cid, msgId)
+      // Zero out unread for active conversation
+      unreadByConversation.set(cid, 0)
+      const conv = getConversationById(cid)
+      if (conv) { conv.unreadCount = 0; conv.hasUnread = false }
+    }
+  }
+
+  // Public: trigger a read mark for the active conversation up to msgId
+  // Called from useReadTracker and from ChatPage on scroll-to-bottom
+  function markReadLocal(conversationId, lastReadMessageId) {
+    const cid = String(conversationId ?? '')
+    const numId = Number(lastReadMessageId)
+    if (!cid || isNaN(numId)) return
+    const prev = Number(myLastSeenByConversation.get(cid) ?? 0)
+    if (numId <= prev) return // only forward
+    _sendReadForActiveConversation(cid, numId)
+  }
+
+  // Legacy alias used by useReadTracker — wraps markReadLocal (no HTTP call)
+  function markRead(conversationId, lastReadMessageId) {
+    markReadLocal(conversationId, lastReadMessageId)
+  }
+
+  function setMessage(msg) {
+    if (!msg) return
+    if (currentConversationId.value && String(msg.conversationId) !== String(currentConversationId.value)) return
+    if (!msg.text && (!msg.attachments || !msg.attachments.length)) return
+    const existing = messagesMap.get(msg.id)
+    if (existing && (existing.status === 'sending' || existing.status === 'failed' || existing.status === 'editing')) {
+      return // don't overwrite optimistic local messages
+    }
+    messagesMap.set(msg.id, existing ? { ...existing, ...msg } : msg)
+  }
+
+  function hasMessage(msgId) {
+    return messagesMap.has(String(msgId))
+  }
+
+  function updateMessage(messageId, patch) {
+    const key = String(messageId)
+    const existing = messagesMap.get(key)
+    if (!existing) return
+    messagesMap.set(key, { ...existing, ...patch })
+  }
+
+  function removeMessage(messageId) {
+    messagesMap.delete(String(messageId))
+  }
+
+  function clearMessages() {
+    messagesMap.clear()
+  }
+
+  function setMessages(arr) {
+    messagesMap.clear()
+    for (const m of arr) if (m) messagesMap.set(String(m.id), m)
+  }
 
   async function fetchJSON(url, options = {}) {
     isLoading.value = true
@@ -134,10 +396,8 @@ export const useChatStore = defineStore('chat', () => {
         ...options,
         signal: options.signal ?? controller.signal,
       })
-
       const rawBody = await response.text()
       let parsedBody = null
-
       if (rawBody.trim()) {
         if (response.headers.get('content-type')?.includes('application/json')) {
           try { parsedBody = JSON.parse(rawBody) } catch { parsedBody = rawBody }
@@ -145,7 +405,6 @@ export const useChatStore = defineStore('chat', () => {
           parsedBody = rawBody
         }
       }
-
       if (!response.ok) {
         const data = parsedBody
         const serverMessage = typeof data === 'object' && data !== null
@@ -153,7 +412,6 @@ export const useChatStore = defineStore('chat', () => {
           : data
         throw new Error(serverMessage || response.statusText || `HTTP ${response.status}`)
       }
-
       return parsedBody
     } catch (err) {
       error.value = err?.name === 'AbortError'
@@ -181,7 +439,9 @@ export const useChatStore = defineStore('chat', () => {
       const upload = (form) => fetchJSON(url, { method: 'POST', headers: authHeaders(null), body: form })
 
       try { return await upload(buildForm('files')) } catch (err) {
-        try { return await upload(buildForm('files[]')) } catch {
+        if (err instanceof TypeError || err?.name === 'AbortError') throw err
+        try { return await upload(buildForm('files[]')) } catch (err2) {
+          if (err2 instanceof TypeError || err2?.name === 'AbortError') throw err2
           const legacyUrl = url.replace(/\/messages$/i, '/attachments')
           if (legacyUrl !== url) {
             try { return await upload(buildForm('files', ['text', 'Text', 'caption'])) } catch {}
@@ -205,7 +465,24 @@ export const useChatStore = defineStore('chat', () => {
     _getConversationsPromise = (async () => {
       try {
         const data = await fetchJSON('/conversations', { headers: authHeaders() })
-        conversations.value = getConversationListPayload(data).map(c => decorateConversation(normalizeConversation(c)))
+        const incoming = getConversationListPayload(data).map(c => decorateConversation(normalizeConversation(c), c?.ad ?? null))
+        // Seed unreadByConversation from server (initial load only — do NOT downgrade if realtime already set higher)
+        for (const conv of incoming) {
+          const cid = String(conv.id ?? '')
+          if (!cid) continue
+          const serverUnread = Number(conv.unreadCount) || 0
+          const localUnread = Number(unreadByConversation.get(cid) ?? -1)
+          if (localUnread < 0) {
+            // First time — accept server value
+            unreadByConversation.set(cid, serverUnread)
+          } else {
+            // Already have local value — take max (never downgrade)
+            unreadByConversation.set(cid, Math.max(localUnread, serverUnread))
+          }
+          // Sync the unreadCount field on the conv object
+          conv.unreadCount = unreadByConversation.get(cid)
+        }
+        conversations.value = incoming
         return conversations.value
       } finally {
         _getConversationsPromise = null
@@ -217,48 +494,133 @@ export const useChatStore = defineStore('chat', () => {
   async function findConversationByAdId(adId) {
     if (!conversations.value.length) await getConversations()
     const id = `${adId}`
-    return conversations.value.find(c => `${c.adId}` === id || `${c.relatedAdId}` === id || `${c.targetAdId}` === id) || null
+    return conversations.value.find(c => `${c.ad?.id ?? c.adId ?? c.relatedAdId ?? c.targetAdId ?? ''}` === id) || null
   }
 
-  async function sendMessageByAdId(adId, text, attachments = []) {
-    const response = await postMessage(`/conversations/by-ad/${adId}/messages`, { text, attachments })
-    const message = normalizeMessage(response?.message || response?.data || response)
-    const conversationId = response?.conversationId || response?.conversation?.id || response?.conversation?.conversationId || message?.conversationId
-    if (!conversationId && !message?.conversationId && !response?.conversation && !response?.conversationId) throw new Error('Invalid response from server')
-    const resolvedId = conversationId || message?.conversationId || adId
-    const existing = conversations.value.find(c => String(c.id) === String(resolvedId))
-    if (existing) {
-      currentConversation.value = existing
-    } else {
-      currentConversation.value = decorateConversation(response?.conversation || response?.message?.conversation || { id: resolvedId, adId, unreadCount: 0 }, response?.ad || null)
-      conversations.value.unshift(currentConversation.value)
+  async function sendMessageByAdId(adIdVal, text, attachments = []) {
+    const tempId = `temp-${Date.now()}-${++_tempSeq}`
+    const myUserId = _getCurrentUserId()
+
+    const optimistic = {
+      id: tempId,
+      conversationId: '',
+      text: text ?? '',
+      authorId: myUserId,
+      createdAt: new Date().toISOString(),
+      attachments: Array.isArray(attachments) ? attachments : [],
+      status: 'sending',
+      ad: adIdVal != null ? { id: adIdVal } : null,
+      _adId: adIdVal,
     }
-    upsertMessage(messages.value, message)
-    const msgId = Number(message.id)
-    if (!isNaN(msgId) && (lastKnownId.value === null || msgId > lastKnownId.value)) lastKnownId.value = msgId
-    return { conversationId: resolvedId, message }
+
+    let shown = false
+    const timer = setTimeout(() => {
+      messagesMap.set(tempId, optimistic)
+      shown = true
+    }, OPTIMISTIC_DELAY)
+
+    try {
+      const response = await postMessage(`/conversations/by-ad/${adIdVal}/messages`, { text, attachments })
+      const message = normalizeMessage(response)
+      const conversationId = message?.conversationId || response?.conversation?.id || response?.conversation?.conversationId
+      if (!conversationId) throw new Error('Invalid response from server')
+
+      clearTimeout(timer)
+      if (shown) messagesMap.delete(tempId)
+
+      const existing = conversations.value.find(c => String(c.id) === String(conversationId))
+      if (existing) {
+        currentConversation.value = existing
+      } else {
+        currentConversation.value = decorateConversation(response?.conversation || { id: conversationId, ad: adIdVal != null ? { id: adIdVal } : null, unreadCount: 0 }, response?.ad || null)
+        conversations.value.unshift(currentConversation.value)
+      }
+      currentConversationId.value = String(conversationId)
+      if (message) setMessage(message)
+
+      const msgId = Number(message?.id)
+      if (!isNaN(msgId) && (lastKnownId.value === null || msgId > lastKnownId.value)) lastKnownId.value = msgId
+      return { conversationId, message }
+    } catch (err) {
+      clearTimeout(timer)
+      error.value = null
+      if (!shown) messagesMap.set(tempId, optimistic)
+      const ex = messagesMap.get(tempId)
+      if (ex) messagesMap.set(tempId, { ...ex, status: 'failed', error: err?.message || 'Ошибка отправки' })
+      return null
+    }
+  }
+
+  async function retryMessage(msgId) {
+    const msg = messagesMap.get(String(msgId))
+    if (!msg || msg.status !== 'failed') return null
+
+    messagesMap.set(msg.id, { ...msg, status: 'sending', error: null })
+
+    const adIdVal = msg._adId
+    const cid = msg.conversationId || currentConversationId.value
+
+    try {
+      let response
+      if (adIdVal && !cid) {
+        response = await postMessage(`/conversations/by-ad/${adIdVal}/messages`, { text: msg.text, attachments: msg.attachments })
+        const real = normalizeMessage(response)
+        const conversationId = real?.conversationId || response?.conversation?.id
+        messagesMap.delete(msg.id)
+        if (conversationId) {
+          currentConversationId.value = String(conversationId)
+          const existing = conversations.value.find(c => String(c.id) === String(conversationId))
+          if (existing) {
+            currentConversation.value = existing
+          } else {
+            currentConversation.value = decorateConversation(response?.conversation || { id: conversationId, ad: adIdVal != null ? { id: adIdVal } : null, unreadCount: 0 }, response?.ad || null)
+            conversations.value.unshift(currentConversation.value)
+          }
+        }
+        if (real) setMessage(real)
+        const id = real ? Number(real.id) : NaN
+        if (!isNaN(id) && (lastKnownId.value === null || id > lastKnownId.value)) lastKnownId.value = id
+        return conversationId ? { conversationId } : null
+      } else {
+        response = await postMessage(`/conversations/${cid}/messages`, { text: msg.text, attachments: msg.attachments })
+        const real = normalizeMessage(response)
+        messagesMap.delete(msg.id)
+        if (real) setMessage(real)
+        const id = real ? Number(real.id) : NaN
+        if (!isNaN(id) && (lastKnownId.value === null || id > lastKnownId.value)) lastKnownId.value = id
+        return null
+      }
+    } catch (err) {
+      error.value = null
+      const existing = messagesMap.get(msg.id)
+      if (existing) messagesMap.set(msg.id, { ...existing, status: 'failed', error: err?.message || 'Ошибка отправки' })
+      return null
+    }
   }
 
   async function loadConversation(conversationId, options = {}) {
+    const cid = String(conversationId)
+    currentConversationId.value = cid
     currentConversation.value = null
-    const prevMessages = messages.value.slice()
-    messages.value = []
+    clearMessages()
     hasMore.value = false
     lastKnownId.value = null
     anchorMessageId.value = null
-    myLastSeenMessageId.value = null
-    otherLastSeenMessageId.value = null
-    let conv = conversations.value.find(c => String(c.id) === String(conversationId))
+    // Do NOT clear myLastSeenByConversation / otherLastSeenByConversation / unreadByConversation
+    // — they may already have realtime data
+    let conv = conversations.value.find(c => String(c.id) === cid)
     if (!conv && !options.skipConversationsFetch) {
       await getConversations()
-      conv = conversations.value.find(c => String(c.id) === String(conversationId)) || null
+      conv = conversations.value.find(c => String(c.id) === cid) || null
     }
-    currentConversation.value = conv || decorateConversation({ id: conversationId })
-    await loadMessages(conversationId, { ...options, prevMessages })
+    currentConversation.value = conv || normalizeConversation({ id: conversationId })
+    await loadMessages(conversationId, options)
     return currentConversation.value
   }
 
   async function loadMessages(conversationId, options = {}) {
+    const requestedCid = String(conversationId)
+
     const beforeId = options.before ?? null
     const sinceId = options.since ?? null
     const params = []
@@ -268,97 +630,104 @@ export const useChatStore = defineStore('chat', () => {
     const url = `/conversations/${conversationId}/messages` + (params.length ? '?' + params.join('&') : '')
     const response = await fetchJSON(url, { headers: authHeaders() })
 
+    if (currentConversationId.value !== requestedCid) return messages.value
+
     if (response && typeof response === 'object' && Array.isArray(response.messages)) {
-      const normalized = response.messages.map(normalizeMessage)
+      const normalized = response.messages.map(normalizeMessage).filter(Boolean)
       if (beforeId) {
         hasMore.value = Boolean(response.hasMore)
-        const existingIds = new Set(messages.value.map(m => String(m.id)))
-        const fresh = normalized.filter(m => !existingIds.has(String(m.id)))
-        messages.value = [...fresh, ...messages.value]
+        for (const m of normalized) setMessage(m)
       } else if (sinceId) {
-        const existingIds = new Set(messages.value.map(m => String(m.id)))
-        const fresh = normalized.filter(m => !existingIds.has(String(m.id)))
-        messages.value.push(...fresh)
+        // Append-only — never touch read state
+        for (const m of normalized) setMessage(m)
       } else {
+        // Initial load — full replace of messages but preserve realtime read state
         hasMore.value = Boolean(response.hasMore)
-        const rawConv = { id: conversationId, ...(response.conversation || {}) }
-        const decorated = decorateConversation(rawConv, response.ad || null)
+        const rawConv = normalizeConversation({ id: conversationId, ...(response.conversation || {}), ...(response.ad ? { ad: response.ad } : {}) })
         const existing = conversations.value.find(c => String(c.id) === String(conversationId))
         currentConversation.value = {
           ...(currentConversation.value || {}),
-          ...decorated,
-          // Preserve opponent/me/ad from existing if initial response is minimal
-          opponent: decorated.opponent ?? currentConversation.value?.opponent ?? null,
-          me: decorated.me ?? currentConversation.value?.me ?? null,
-          ad: decorated.ad ?? currentConversation.value?.ad ?? null,
-          adTitle: decorated.adTitle ?? currentConversation.value?.adTitle ?? null,
-          counterpartId: decorated.counterpartId ?? currentConversation.value?.counterpartId ?? null,
-          counterpartName: decorated.opponent ? decorated.counterpartName : (currentConversation.value?.counterpartName ?? decorated.counterpartName),
-          counterpartLastActivityAt: decorated.counterpartLastActivityAt ?? currentConversation.value?.counterpartLastActivityAt ?? null,
-          lastMessageType: rawConv.lastMessageType ?? rawConv.last_message_type ?? existing?.lastMessageType ?? 0,
-          lastMessageText: rawConv.lastMessageText ?? rawConv.last_message_text ?? existing?.lastMessageText ?? '',
+          ...rawConv,
+          companion: rawConv.companion ?? currentConversation.value?.companion ?? existing?.companion ?? null,
+          ad: rawConv.ad ?? currentConversation.value?.ad ?? existing?.ad ?? null,
+          lastMessage: rawConv.lastMessage ?? currentConversation.value?.lastMessage ?? existing?.lastMessage ?? null,
+          lastMessageAt: rawConv.lastMessageAt ?? currentConversation.value?.lastMessageAt ?? existing?.lastMessageAt ?? null,
+          firstUnreadMessageId: rawConv.firstUnreadMessageId ?? currentConversation.value?.firstUnreadMessageId ?? existing?.firstUnreadMessageId ?? null,
+          isClosed: rawConv.isClosed ?? currentConversation.value?.isClosed ?? existing?.isClosed ?? false,
+          isMuted: rawConv.isMuted ?? currentConversation.value?.isMuted ?? existing?.isMuted ?? false,
+          isArchived: rawConv.isArchived ?? currentConversation.value?.isArchived ?? existing?.isArchived ?? false,
+          totalMessagesCount: rawConv.totalMessagesCount ?? currentConversation.value?.totalMessagesCount ?? existing?.totalMessagesCount ?? null,
         }
         const idx = conversations.value.findIndex(c => String(c.id) === String(conversationId))
         if (idx !== -1) conversations.value[idx] = currentConversation.value
         else conversations.value.unshift(currentConversation.value)
-        // Merge server snapshot with any existing client-only messages (drafts,
-        // recently injected server messages) to avoid dropping them during a
-        // concurrent reload. Normalized is authoritative; extras are preserved.
-        const prevMessages = options.prevMessages ?? messages.value ?? []
-        const normalizedMap = new Map(normalized.map(m => [String(m.id), m]))
-        const extras = prevMessages.filter(m => !normalizedMap.has(String(m.id)))
-        const merged = [...normalized, ...extras]
-        merged.sort((a, b) => {
-          const ai = Number(a.id)
-          const bi = Number(b.id)
-          const nai = Number.isFinite(ai) ? ai : Number.POSITIVE_INFINITY
-          const nbi = Number.isFinite(bi) ? bi : Number.POSITIVE_INFINITY
-          return nai - nbi
-        })
-        messages.value = merged
+        if (currentConversationId.value !== requestedCid) return messages.value
+        setMessages(normalized)
         anchorMessageId.value = response.anchorMessageId ?? null
 
-        // Backend may provide role-specific last-seen fields: sellerLastSeenMessageId / buyerLastSeenMessageId
-        const sellerLast = response?.sellerLastSeenMessageId ?? response?.sellerLastSeenId ?? null
-        const buyerLast = response?.buyerLastSeenMessageId ?? response?.buyerLastSeenId ?? null
-        if (sellerLast != null && buyerLast != null) {
-          // Resolve current user id from local storage or token
-          let currentUserId = null
-          try { const su = JSON.parse(localStorage.getItem('user') || 'null'); currentUserId = su?.id ?? su?.userId ?? null } catch {}
-          if (!currentUserId) {
-            const payload = parseJwt(localStorage.getItem('token'))
-            currentUserId = payload?.sub ?? payload?.id ?? payload?.userId ?? null
-          }
+        // Seed initial read state from HTTP — only if realtime hasn't set it yet
+        _seedReadState(requestedCid, response)
 
-          // Try to find seller/buyer ids in the conversation payload
-          const sellerId = response?.conversation?.seller?.id ?? response?.conversation?.sellerId ?? currentConversation.value?.seller?.id ?? currentConversation.value?.sellerId ?? null
-          const buyerId = response?.conversation?.buyer?.id ?? response?.conversation?.buyerId ?? currentConversation.value?.buyer?.id ?? currentConversation.value?.buyerId ?? null
-
-          if (sellerId && String(sellerId) === String(currentUserId)) {
-            myLastSeenMessageId.value = Number(sellerLast)
-            otherLastSeenMessageId.value = Number(buyerLast)
-          } else if (buyerId && String(buyerId) === String(currentUserId)) {
-            myLastSeenMessageId.value = Number(buyerLast)
-            otherLastSeenMessageId.value = Number(sellerLast)
-          } else {
-            // Unknown mapping — fallback to explicit fields if present
-            myLastSeenMessageId.value = response.myLastSeenMessageId ?? null
-            otherLastSeenMessageId.value = response.otherLastSeenMessageId ?? null
-          }
-        } else {
-          myLastSeenMessageId.value = response.myLastSeenMessageId ?? null
-          otherLastSeenMessageId.value = response.otherLastSeenMessageId ?? null
+        // Seed initial online state from HTTP (companion.isOnline, companion.lastActivityAt)
+        const companion = response.conversation?.companion ?? rawConv.companion ?? null
+        if (companion?.id != null) {
+          import('./presenceStore').then(({ usePresenceStore }) => {
+            const initialOnlineIds = companion.isOnline ? [String(companion.id)] : []
+            usePresenceStore().seedOnlineUsers(requestedCid, initialOnlineIds)
+          })
         }
       }
       const maxId = computeLastKnownId(messages.value)
       if (maxId !== null) lastKnownId.value = maxId
       return messages.value
     }
-    messages.value = Array.isArray(response) ? response.map(normalizeMessage) : []
+    if (currentConversationId.value !== requestedCid) return messages.value
+    setMessages(Array.isArray(response) ? response.map(normalizeMessage) : [])
     hasMore.value = false
     const maxId = computeLastKnownId(messages.value)
     if (maxId !== null) lastKnownId.value = maxId
     return messages.value
+  }
+
+  // Seed myLastSeen / otherLastSeen from initial HTTP response — only move forward, never back
+  function _seedReadState(cid, response) {
+    const sellerLast = response?.sellerLastSeenMessageId ?? response?.sellerLastSeenId ?? null
+    const buyerLast = response?.buyerLastSeenMessageId ?? response?.buyerLastSeenId ?? null
+
+    let myHttp = null
+    let otherHttp = null
+
+    if (sellerLast != null && buyerLast != null) {
+      let currentUserId = null
+      try { const su = JSON.parse(localStorage.getItem('user') || 'null'); currentUserId = su?.id ?? su?.userId ?? null } catch {}
+      if (!currentUserId) {
+        const payload = parseJwt(localStorage.getItem('token'))
+        currentUserId = payload?.sub ?? payload?.id ?? payload?.userId ?? null
+      }
+      const sellerId = response?.conversation?.seller?.id ?? response?.conversation?.sellerId ?? currentConversation.value?.seller?.id ?? currentConversation.value?.sellerId ?? null
+      const buyerId = response?.conversation?.buyer?.id ?? response?.conversation?.buyerId ?? currentConversation.value?.buyer?.id ?? currentConversation.value?.buyerId ?? null
+
+      if (sellerId && String(sellerId) === String(currentUserId)) {
+        myHttp = Number(sellerLast); otherHttp = Number(buyerLast)
+      } else if (buyerId && String(buyerId) === String(currentUserId)) {
+        myHttp = Number(buyerLast); otherHttp = Number(sellerLast)
+      }
+    }
+    if (myHttp == null) myHttp = Number(response?.myLastSeenMessageId ?? 0)
+    if (otherHttp == null) otherHttp = Number(response?.otherLastSeenMessageId ?? 0)
+
+    // Seed only forward
+    const prevMy = Number(myLastSeenByConversation.get(cid) ?? 0)
+    if (myHttp > prevMy) myLastSeenByConversation.set(cid, myHttp)
+
+    const prevOther = Number(otherLastSeenByConversation.get(cid) ?? 0)
+    if (otherHttp > prevOther) otherLastSeenByConversation.set(cid, otherHttp)
+
+    // Unread count from HTTP — seed only if not yet set
+    const serverUnread = Number(response?.conversation?.unreadCount ?? 0)
+    if (!unreadByConversation.has(cid)) {
+      unreadByConversation.set(cid, serverUnread)
+    }
   }
 
   async function loadMoreMessages() {
@@ -367,21 +736,52 @@ export const useChatStore = defineStore('chat', () => {
     await loadMessages(currentConversation.value?.id, { before: oldestId })
   }
 
-  async function loadNewMessages(conversationId) {
-    const cid = conversationId || currentConversation.value?.id
-    if (!cid || !lastKnownId.value) return
-    await loadMessages(cid, { since: lastKnownId.value })
-  }
+  let _tempSeq = 0
+  const OPTIMISTIC_DELAY = 120
 
-  async function sendMessage(conversationId, text, attachments = []) {
-    const message = normalizeMessage(await postMessage(`/conversations/${conversationId}/messages`, { text, attachments }))
-    upsertMessage(messages.value, message)
-    const id = Number(message.id)
-    if (!isNaN(id) && (lastKnownId.value === null || id > lastKnownId.value)) lastKnownId.value = id
-    return message
-  }
+  async function sendMessage(text, attachments = []) {
+    const cid = currentConversationId.value
+    if (!cid) throw new Error('No active conversation')
 
-  const sendAttachments = (conversationId, files, caption = null) => sendMessage(conversationId, caption, files)
+    const tempId = `temp-${Date.now()}-${++_tempSeq}`
+    const myUserId = _getCurrentUserId()
+
+    const optimistic = {
+      id: tempId,
+      conversationId: String(cid),
+      text: text ?? '',
+      authorId: myUserId,
+      createdAt: new Date().toISOString(),
+      attachments: Array.isArray(attachments) ? attachments : [],
+      status: 'sending',
+    }
+
+    let shown = false
+    const timer = setTimeout(() => {
+      messagesMap.set(tempId, optimistic)
+      shown = true
+    }, OPTIMISTIC_DELAY)
+
+    try {
+      const response = await postMessage(`/conversations/${cid}/messages`, { text, attachments })
+      const real = normalizeMessage(response)
+
+      clearTimeout(timer)
+      if (shown) messagesMap.delete(tempId)
+
+      if (real) setMessage(real)
+
+      const id = real ? Number(real.id) : NaN
+      if (!isNaN(id) && (lastKnownId.value === null || id > lastKnownId.value)) lastKnownId.value = id
+      return real
+    } catch (err) {
+      clearTimeout(timer)
+      error.value = null
+      if (!shown) messagesMap.set(tempId, optimistic)
+      const existing = messagesMap.get(tempId)
+      if (existing) messagesMap.set(tempId, { ...existing, status: 'failed', error: err?.message || 'Ошибка отправки' })
+    }
+  }
 
   async function editMessage(conversationId, messageId, patch = {}) {
     const updated = normalizeMessage(await fetchJSON(`/conversations/${conversationId}/messages/${messageId}`, {
@@ -389,7 +789,7 @@ export const useChatStore = defineStore('chat', () => {
       headers: authHeaders(),
       body: JSON.stringify(patch),
     }))
-    updateMessage(messages.value, messageId, updated)
+    updateMessage(messageId, updated)
     return updated
   }
 
@@ -410,7 +810,7 @@ export const useChatStore = defineStore('chat', () => {
       try { updated = await upload('files[]') }
       catch { throw err }
     }
-    updateMessage(messages.value, messageId, updated)
+    updateMessage(messageId, updated)
     return updated
   }
 
@@ -421,55 +821,12 @@ export const useChatStore = defineStore('chat', () => {
       method: 'DELETE',
       headers: authHeaders(),
     })
-    updateMessage(messages.value, messageId, {
+    const deletedMsg = unwrapMsg(response)
+    updateMessage(messageId, {
       deleted: true,
-      deletedAt: response?.deletedAt || new Date().toISOString(),
+      deletedAt: deletedMsg?.deletedAt || new Date().toISOString(),
       text: '',
     })
-  }
-
-  async function markRead(conversationId, lastSeenMessageId) {
-    if (!conversationId || lastSeenMessageId == null) return
-    const cid = String(conversationId)
-    const numId = Number(lastSeenMessageId)
-    if (isNaN(numId)) return
-
-    // Safety: do not allow marking messages as read if they belong to the current user.
-    // Compute current user id from localStorage or token payload.
-    let currentUserId = null
-    try { const storedUser = JSON.parse(localStorage.getItem('user') || 'null'); currentUserId = storedUser?.id ?? storedUser?.userId ?? null } catch {}
-    if (!currentUserId) {
-      const payload = parseJwt(localStorage.getItem('token'))
-      currentUserId = payload?.sub ?? payload?.id ?? payload?.userId ?? null
-    }
-
-    if (currentUserId != null) {
-      let maxIncoming = null
-      for (const m of messages.value) {
-        const authorId = String(m.authorId ?? m.senderId ?? m.author?.id ?? '')
-        if (authorId && String(authorId) !== String(currentUserId)) {
-          const idNum = Number(m.id)
-          if (!isNaN(idNum) && (maxIncoming === null || idNum > maxIncoming)) maxIncoming = idNum
-        }
-      }
-      // If there are no incoming messages at all, or requested lastSeen is beyond
-      // the last incoming message, block the client-side read to avoid marking own messages.
-      if (maxIncoming === null || numId > maxIncoming) {
-        console.warn(`Blocked markRead: lastSeen ${numId} > maxIncoming ${maxIncoming}`)
-        return
-      }
-    }
-
-    await fetchJSON(`/conversations/${conversationId}/read?lastSeenMessageId=${lastSeenMessageId}`, { method: 'PATCH', headers: authHeaders() }).catch(() => {})
-    if (!isNaN(numId) && (myLastSeenMessageId.value === null || numId > myLastSeenMessageId.value)) {
-      myLastSeenMessageId.value = numId
-    }
-    if (String(currentConversation.value?.id ?? '') === cid) {
-      currentConversation.value.unreadCount = 0
-      currentConversation.value.hasUnread = false
-    }
-    const conv = conversations.value.find(item => String(item.id) === cid)
-    if (conv) { conv.unreadCount = 0; conv.hasUnread = false }
   }
 
   async function mute(conversationId, isMuted = true) {
@@ -480,11 +837,11 @@ export const useChatStore = defineStore('chat', () => {
     })
     const cid = String(conversationId)
     if (String(currentConversation.value?.id ?? '') === cid) {
-      currentConversation.value.muted = isMuted
       currentConversation.value.isMuted = isMuted
+      currentConversation.value.muted = isMuted
     }
     const conv = conversations.value.find(c => String(c.id) === cid)
-    if (conv) { conv.muted = isMuted; conv.isMuted = isMuted }
+    if (conv) { conv.isMuted = isMuted; conv.muted = isMuted }
   }
 
   async function archive(conversationId, archived = true) {
@@ -495,20 +852,46 @@ export const useChatStore = defineStore('chat', () => {
     })
     const cid = String(conversationId)
     if (String(currentConversation.value?.id ?? '') === cid) {
-      currentConversation.value.archived = archived
       currentConversation.value.isArchived = archived
+      currentConversation.value.archived = archived
     }
     const conv = conversations.value.find(c => String(c.id) === cid)
-    if (conv) { conv.archived = archived; conv.isArchived = archived }
+    if (conv) { conv.isArchived = archived; conv.archived = archived }
   }
 
   return {
-    normalizeMessage,
-    conversations, currentConversation, messages, hasMore, isLoading, error,
-    lastKnownId, anchorMessageId, myLastSeenMessageId, otherLastSeenMessageId,
-    getConversations, findConversationByAdId, loadConversation, loadMessages, loadMoreMessages, loadNewMessages,
-    sendMessage, sendAttachments, sendMessageByAdId,
+    conversations,
+    unreadCount,
+    currentConversation,
+    messages,
+    hasMore,
+    isLoading,
+    error,
+    lastKnownId,
+    anchorMessageId,
+    // Read state as computed refs for current conversation
+    myLastSeenMessageId,
+    otherLastSeenMessageId,
+    // Per-conversation Maps (for components that need cross-conv data)
+    myLastSeenByConversation,
+    otherLastSeenByConversation,
+    unreadByConversation,
+    currentConversationId,
+    // Message operations
+    setMessage, updateMessage, removeMessage, clearMessages, setMessages, hasMessage,
+    // Realtime handlers
+    applyIncomingMessage,
+    applyRemoteRead,
+    markRead,
+    markReadLocal,
+    // Conversation operations
+    getConversationById,
+    getConversations, findConversationByAdId, loadConversation, loadMessages, loadMoreMessages,
+    // Message send/edit/delete
+    sendMessage, sendMessageByAdId, retryMessage,
     editMessage, addMessageAttachment, addMessageAttachments,
-    deleteMessage, markRead, mute, archive,
+    deleteMessage,
+    // Conversation settings
+    mute, archive,
   }
 })

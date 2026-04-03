@@ -1,5 +1,5 @@
 <script setup>
-import { computed, onMounted, onUnmounted, watch, ref } from 'vue'
+import { computed, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '../stores/userStore'
 import { useChatStore } from '../stores/chatStore'
@@ -12,7 +12,8 @@ const router = useRouter()
 
 const openGroup = ref(null)
 const notificationsToggle = ref(null)
-const unreadMessagesCount = computed(() => chatStore.conversations.reduce((sum, conv) => sum + (Number(conv.unreadCount) || 0), 0))
+const chatUnreadCount = computed(() => chatStore.unreadCount)
+const notificationsCount = computed(() => notificationsStore.unreadCount)
 
 function toggleGroup(adId) {
   const key = String(adId ?? 'other')
@@ -55,29 +56,6 @@ function handleLogout() {
   userStore.logout()
   router.push('/login')
 }
-
-async function syncChatConversations() {
-  if (!userStore.token) return
-  await chatStore.getConversations().catch(() => {})
-}
-
-watch(
-  () => userStore.token,
-  (token) => {
-    if (token) notificationsStore.connect()
-    else notificationsStore.disconnect()
-    if (token) syncChatConversations()
-  }
-)
-
-onMounted(() => {
-  if (userStore.token) notificationsStore.connect()
-  syncChatConversations()
-})
-
-onUnmounted(() => {
-  notificationsStore.disconnect()
-})
 
 const typeLabels = {
   0: 'Одобрено',
@@ -122,11 +100,11 @@ const typeLabels = {
             <router-link class="nav-link px-3 rounded-pill position-relative d-inline-flex align-items-center" to="/chat">
               <span>Чаты</span>
               <span
-                v-if="unreadMessagesCount"
+                v-if="chatUnreadCount"
                 class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger"
                 style="font-size:0.65rem;min-width:1.2rem;padding:0.22rem 0.35rem;"
               >
-                {{ unreadMessagesCount > 99 ? '99+' : unreadMessagesCount }}
+                {{ chatUnreadCount > 99 ? '99+' : chatUnreadCount }}
               </span>
             </router-link>
           </li>
@@ -158,11 +136,11 @@ const typeLabels = {
                   <path d="M8 16a2 2 0 0 0 2-2H6a2 2 0 0 0 2 2zm.995-14.901a1 1 0 1 0-1.99 0A5.002 5.002 0 0 0 3 6c0 1.098-.5 6-2 7h14c-1.5-1-2-5.902-2-7a5.002 5.002 0 0 0-4.005-4.901z"/>
                 </svg>
                 <span
-                  v-if="notificationsStore.unreadCount"
+                  v-if="notificationsCount"
                   class="position-absolute top-0 start-100 translate-middle badge rounded-pill bg-danger"
                   style="font-size:0.65rem;min-width:1.2rem;padding:0.22rem 0.35rem;"
                 >
-                  {{ notificationsStore.unreadCount > 99 ? '99+' : notificationsStore.unreadCount }}
+                  {{ notificationsCount > 99 ? '99+' : notificationsCount }}
                 </span>
               </button>
 

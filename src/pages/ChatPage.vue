@@ -3,7 +3,8 @@ import { ref, reactive, onMounted, onBeforeUnmount, watch, computed, nextTick } 
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '../stores/chatStore'
 import { useUserStore } from '../stores/userStore'
-import { useNotificationsStore } from '../stores/notificationsStore'
+import { usePresenceStore } from '../stores/presenceStore'
+import { useTypingStore } from '../stores/typingStore'
 import { getApiBaseUrl } from '../config/apiBase'
 import { timeAgo, chatTime, messageTime } from '../utils/formatDate'
 import { useReadTracker } from '../composables/useReadTracker'
@@ -14,7 +15,8 @@ const route = useRoute()
 const router = useRouter()
 const chatStore = useChatStore()
 const userStore = useUserStore()
-const notificationsStore = useNotificationsStore()
+const presenceStore = usePresenceStore()
+const typingStore = useTypingStore()
 
 // Состояние чата и редактора сообщений.
 const messagesContainer = ref(null)
@@ -26,11 +28,11 @@ const composer = reactive({
   originalAttachments: null,
   messageId: null,
 })
-const outgoingMessageSeq = ref(0)
 const pendingAdId = ref(null)
 const readTracker = useReadTracker(messagesContainer, (msg) => {
-  const idVal = msg?.id
-  const hasServerId = Number.isFinite(Number(idVal)) && !String(idVal).startsWith('local-')
+  const idStr = String(msg?.id ?? '')
+  const isTemp = idStr.startsWith('temp-') || idStr.startsWith('local-')
+  const hasServerId = !isTemp && Number.isFinite(Number(idStr))
   return !isMine(msg) && hasServerId
 })
 const scrollManager = useScrollManager(messagesContainer)
@@ -38,6 +40,7 @@ const scrollManager = useScrollManager(messagesContainer)
 const conversationId = computed(() => route.params.conversationId || null)
 const adId = computed(() => route.params.adId || null)
 const isEditing = computed(() => composerMode.value === 'edit')
+const isSidebarOpen = ref(false)
 const currentUserId = computed(() => String(userStore.tokenUserId || userStore.user?.id || ''))
 const isPendingConversation = computed(() => Boolean(pendingAdId.value && !chatStore.currentConversation?.id))
 
@@ -91,6 +94,26 @@ const isImageAttachment = (p) => matchesType(p, 'image/', IMG_RE)
 const isAudioAttachment = (p) => matchesType(p, 'audio/', AUD_RE)
 const isVideoAttachment = (p) => matchesType(p, 'video/', VID_RE)
 const mediaViewer = useMediaViewer({ buildUrl, isVideoAttachment })
+const brokenMedia = reactive({})
+
+function getMediaErrorKey(message, attachment, index = 0) {
+  const rawValue = isFileObject(attachment)
+    ? `${attachment.name || ''}:${attachment.size || ''}:${attachment.lastModified || ''}`
+    : attachment?.id ?? attachment?.url ?? attachment?.path ?? attachment?.src ?? attachment?.filePath ?? attachment?.value ?? attachment ?? ''
+  return `${message?.id ?? 'message'}:${index}:${String(rawValue)}`
+}
+
+function markMediaBroken(message, attachment, index = 0) {
+  brokenMedia[getMediaErrorKey(message, attachment, index)] = true
+}
+
+function clearBrokenMedia(message, attachment, index = 0) {
+  delete brokenMedia[getMediaErrorKey(message, attachment, index)]
+}
+
+function isMediaBroken(message, attachment, index = 0) {
+  return Boolean(brokenMedia[getMediaErrorKey(message, attachment, index)])
+}
 
 
 function getInitial(name, fallback = '?') {
@@ -144,7 +167,9 @@ function findFirstUnreadIncomingMessageId(lastSeenMessageId = chatStore.myLastSe
 }
 
 function captureUnreadDivider() {
-  unreadDividerId.value = findFirstUnreadIncomingMessageId()
+  const id = findFirstUnreadIncomingMessageId()
+  unreadDividerId.value = id
+  scrollManager.firstUnreadId.value = id
 }
 
 function isMine(msg) {
@@ -161,14 +186,18 @@ function getAuthorAvatar(msg) {
 }
 
 function convLastLabel(conv) {
-  const type = String(conv.lastMessageType ?? '').toLowerCase()
-  if (type === '1' || type === 'image') return '📷 Вложение'
-  if (type === '2' || type === 'file') return '📄 Вложение'
-  return conv.lastMessageText
+  const lastMessage = conv?.lastMessage ?? null
+  const type = String(lastMessage?.type ?? conv?.lastMessageType ?? '').toLowerCase()
+  if (type === 'image' || type === 'photo') return '📷 Вложение'
+  if (type === 'file' || type === 'document') return '📄 Вложение'
+  return lastMessage?.text ?? conv?.lastMessageText ?? ''
 }
 
 function convPreviewUrl(conv) {
-  return conv.lastMessageType === 1 && conv.lastMessageText ? buildUrl(conv.lastMessageText) : null
+  const lastMessage = conv?.lastMessage ?? null
+  const type = String(lastMessage?.type ?? conv?.lastMessageType ?? '').toLowerCase()
+  const source = lastMessage?.text ?? conv?.lastMessageText ?? ''
+  return (type === 'image' || type === 'photo') && source ? buildUrl(source) : null
 }
 
 function getReplyMessage(message) {
@@ -176,35 +205,30 @@ function getReplyMessage(message) {
   return chatStore.messages.find(item => String(item.id) === String(message.replyToMessageId)) || null
 }
 
-function scrollToMessage(messageId) {
-  const el = document.getElementById(`message-${messageId}`)
-  if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' })
-}
-
 function getMessageAttachments(msg) {
   return Array.isArray(msg?.attachments) ? msg.attachments.filter(Boolean) : []
 }
 
 function isOutgoingMessage(msg) {
-  return msg?.clientStatus === 'sending' || msg?.clientStatus === 'failed'
+  return msg?.status === 'sending' || msg?.status === 'failed'
 }
 
 function isMessageBusy(msg) {
-  return msg?.clientStatus === 'sending' || msg?.clientStatus === 'editing'
+  return msg?.status === 'sending' || msg?.status === 'editing'
 }
 
 function getMessageBubbleClass(msg) {
-  if (msg?.clientStatus === 'sending' || msg?.clientStatus === 'editing')
+  if (msg?.status === 'sending' || msg?.status === 'editing')
     return 'bg-warning-subtle text-body border-warning-subtle'
-  if (msg?.clientStatus === 'failed')
+  if (msg?.status === 'failed')
     return 'bg-danger-subtle text-body border-danger-subtle'
   return isMine(msg) ? 'bg-white text-body border-primary-subtle' : 'bg-white border-white'
 }
 
 function getMessagePreviewLabel(msg) {
-  if (msg?.clientStatus === 'sending') return 'Отправка...'
-  if (msg?.clientStatus === 'editing') return 'Сохранение...'
-  if (msg?.clientStatus === 'failed') return msg.clientError || 'Не удалось отправить'
+  if (msg?.status === 'sending') return 'Отправка...'
+  if (msg?.status === 'editing') return 'Сохранение...'
+  if (msg?.status === 'failed') return msg.error || 'Не удалось отправить'
   return ''
 }
 
@@ -233,7 +257,7 @@ function getAttachmentName(att) {
 }
 
 function getMessageContentStyle(msg) {
-  return getAudioAttachments(msg).length ? 'width: 100%; max-width: min(96vw, 520px);' : 'max-width: min(72%, 620px);'
+  return getAudioAttachments(msg).length ? 'width: 100%; max-width: min(96vw, 520px);' : 'min-width: 140px; width: fit-content; max-width: min(72%, 620px);'
 }
 
 const ATTACHMENT_META = { image: ['Изображение', '🖼️'], video: ['Видео', '🎬'], audio: ['Аудио', '🎵'], file: ['Файл', '📄'] }
@@ -286,24 +310,23 @@ function cleanupMessagePreviews(message) {
   try { for (const att of message?.attachments || []) if (isFileObject(att)) revokeFilePreview(att) } catch {}
 }
 
-function removeLocalMessage(messageId) {
-  const idx = chatStore.messages.findIndex(item => String(item.id) === String(messageId))
-  if (idx !== -1) {
-    cleanupMessagePreviews(chatStore.messages[idx])
-    chatStore.messages.splice(idx, 1)
-  }
-}
-
 async function sendNewMessage() {
-  const draft = createOutgoingMessageDraft({
-    text: composer.text, attachments: [...composer.attachments],
-    conversationId: chatStore.currentConversation?.id || null,
-    adId: pendingAdId.value || adId.value,
-  })
-  chatStore.messages.push(draft)
-  scrollManager.scrollToBottom()
+  const text = composer.text
+  const attachments = [...composer.attachments]
+  attachments.forEach(setFilePreview)
   resetComposer({ revokePreviews: false })
-  await sendOutgoingMessageDraft(draft)
+  scrollManager.scrollToBottom()
+
+  if (chatStore.currentConversationId) {
+    await chatStore.sendMessage(text, attachments)
+  } else if (pendingAdId.value || adId.value) {
+    const result = await chatStore.sendMessageByAdId(pendingAdId.value || adId.value, text, attachments)
+    if (result?.conversationId) {
+      pendingAdId.value = null
+      await router.replace(`/chat/${result.conversationId}`)
+    }
+  }
+  scrollManager.scrollToBottom()
 }
 
 function startEdit(message) {
@@ -321,70 +344,6 @@ function removeAttachment(index) {
   resizeTextarea()
 }
 
-function createOutgoingMessageDraft({ text, attachments, conversationId, adId, retryFromId = null }) {
-  const messageId = `local-${Date.now()}-${++outgoingMessageSeq.value}`
-  const authorId = currentUserId.value || userStore.tokenUserId || userStore.user?.id || null
-  return {
-    id: retryFromId || messageId, authorId, senderId: authorId, author: userStore.user || null,
-    text: text ?? '', attachments: Array.isArray(attachments) ? attachments : [],
-    createdAt: new Date().toISOString(), clientStatus: 'sending', clientError: null,
-    clientDraft: { text: text ?? '', attachments: Array.isArray(attachments) ? attachments : [], conversationId: conversationId ?? null, adId: adId ?? null },
-  }
-}
-
-async function sendOutgoingMessageDraft(message) {
-  if (!message?.clientDraft) return false
-  const draft = message.clientDraft
-  const attachments = Array.isArray(draft.attachments) ? draft.attachments : []
-  const cid = draft.conversationId ?? chatStore.currentConversation?.id ?? null
-  const adIdVal = draft.adId ?? pendingAdId.value ?? adId.value
-  message.clientStatus = 'sending'
-  message.clientError = null
-  try {
-    const result = cid
-      ? (attachments.length ? await chatStore.sendAttachments(cid, attachments, draft.text) : await chatStore.sendMessage(cid, draft.text, []))
-      : await chatStore.sendMessageByAdId(adIdVal, draft.text, attachments)
-    console.log('[sendOutgoing] server result:', result)
-    cleanupMessagePreviews(message)
-
-    // Ensure server message is present in the messages list. In some race
-    // conditions the server response may not be reflected in the DOM
-    // immediately; insert the server message into the store if missing.
-    try {
-      const serverMsg = result?.message ?? result
-      const serverId = serverMsg?.id ?? null
-      if (serverId != null) {
-        const exists = chatStore.messages.find(m => String(m.id) === String(serverId))
-        if (!exists) {
-          const normalized = chatStore.normalizeMessage ? chatStore.normalizeMessage(serverMsg) : serverMsg
-          chatStore.messages.push(normalized)
-          console.log('[sendOutgoing] injected server message into store', normalized.id)
-        }
-      }
-    } catch (e) {
-      console.warn('[sendOutgoing] failed to ensure server message in store', e)
-    }
-
-    // Remove only the local draft copy (keep server message visible)
-    removeLocalMessage(message.id)
-    if (result?.conversationId && !cid) {
-      pendingAdId.value = null
-      await router.replace(`/chat/${result.conversationId}`)
-    }
-    scrollManager.scrollToBottom()
-    return true
-  } catch (err) {
-    message.clientStatus = 'failed'
-    message.clientError = err?.message || 'Ошибка отправки сообщения'
-    return false
-  }
-}
-
-async function retryPendingMessage(message) {
-  if (!message?.clientDraft || message.clientStatus === 'sending') return
-  await sendOutgoingMessageDraft(message)
-}
-
 async function confirmEdit() {
   if (composerMode.value !== 'edit') return
   const cid = chatStore.currentConversation?.id
@@ -395,9 +354,8 @@ async function confirmEdit() {
   if (!textChanged && !attachmentsChanged) return resetComposer()
 
   const editId = String(composer.messageId)
-  const setStatus = (s, err = null) => {
-    const m = chatStore.messages.find(m => String(m.id) === editId)
-    if (m) { m.clientStatus = s; m.clientError = err }
+  const setStatus = (s) => {
+    chatStore.updateMessage(editId, { status: s })
   }
   setStatus('editing')
   try {
@@ -411,27 +369,40 @@ async function confirmEdit() {
       await chatStore.addMessageAttachments(cid, composer.messageId, newFiles)
       newFiles.forEach(revokeFilePreview)
     }
-    setStatus(null)
+    setStatus('sent')
     resetComposer()
   } catch (err) {
-    setStatus(null)
+    setStatus('sent')
     throw err
   }
 }
 
 const cancelEdit = () => resetComposer()
 
+async function retryMessage(message) {
+  if (message.status !== 'failed') return
+  const result = await chatStore.retryMessage(message.id)
+  if (result?.conversationId) {
+    pendingAdId.value = null
+    await router.replace(`/chat/${result.conversationId}`)
+  }
+  scrollManager.scrollToBottom()
+}
+
 async function removeMessage(message) {
-  if (isOutgoingMessage(message)) return removeLocalMessage(message.id)
+  if (isOutgoingMessage(message)) {
+    cleanupMessagePreviews(message)
+    return chatStore.removeMessage(message.id)
+  }
   await chatStore.deleteMessage(chatStore.currentConversation.id, message.id)
 }
 
 async function toggleMute() {
-  if (chatStore.currentConversation?.id) await chatStore.mute(chatStore.currentConversation.id, !chatStore.currentConversation.muted)
+  if (chatStore.currentConversation?.id) await chatStore.mute(chatStore.currentConversation.id, !chatStore.currentConversation.isMuted)
 }
 
 async function toggleArchive() {
-  if (chatStore.currentConversation?.id) await chatStore.archive(chatStore.currentConversation.id, !chatStore.currentConversation.archived)
+  if (chatStore.currentConversation?.id) await chatStore.archive(chatStore.currentConversation.id, !chatStore.currentConversation.isArchived)
 }
 
 function selectConversation(id) { if (id) router.push(`/chat/${id}`) }
@@ -439,8 +410,9 @@ function selectConversation(id) { if (id) router.push(`/chat/${id}`) }
 async function initChat() {
   try {
     const prevConvId = chatStore.currentConversation?.id
-    if (prevConvId) notificationsStore.leaveConversation(prevConvId)
+    if (prevConvId) await presenceStore.leaveGroup(prevConvId)
     unreadDividerId.value = null
+    scrollManager.firstUnreadId.value = null
     readTracker.flushRead()
     readTracker.disconnectObserver()
     mediaViewer.close()
@@ -450,11 +422,12 @@ async function initChat() {
       pendingAdId.value = null
       await chatStore.loadConversation(conversationId.value, { skipConversationsFetch: true })
       captureUnreadDivider()
-      notificationsStore.joinConversation(conversationId.value)
+      await presenceStore.joinGroup(conversationId.value)
+      const companion = chatStore.currentConversation?.companion ?? null
+      if (companion?.id != null && companion?.isOnline) presenceStore.seedOnlineUsers(conversationId.value, [String(companion.id)])
       scrollManager.scrollToAnchorOrBottom(chatStore.anchorMessageId)
       // Expose store for quick debugging in DevTools console.
       try { window.__chatStore = chatStore } catch {}
-      try { window.__sendOutgoing = sendOutgoingMessageDraft } catch {}
       nextTick(() => readTracker.setupObserver())
       return
     }
@@ -464,14 +437,16 @@ async function initChat() {
       if (existing?.id) return router.replace(`/chat/${existing.id}`)
       pendingAdId.value = adId.value
       unreadDividerId.value = null
-      chatStore.currentConversation = { id: null, adId: adId.value, title: `Чат по объявлению ${adId.value}` }
-      chatStore.messages = []
+      scrollManager.firstUnreadId.value = null
+      chatStore.currentConversation = { id: null, ad: { id: adId.value }, companion: null, lastMessage: null, lastMessageAt: null, unreadCount: 0, firstUnreadMessageId: null, isClosed: false, isMuted: false, isArchived: false, totalMessagesCount: 0 }
+      chatStore.currentConversationId = null
+      chatStore.clearMessages()
       return
     }
     pendingAdId.value = null
-    unreadDividerId.value = null
     chatStore.currentConversation = null
-    chatStore.messages = []
+    chatStore.currentConversationId = null
+    chatStore.clearMessages()
   } catch (err) {
     chatStore.error = err?.message || 'Ошибка загрузки чата'
   }
@@ -479,7 +454,11 @@ async function initChat() {
 
 async function onSubmit() {
   try {
-    isEditing.value ? await confirmEdit() : await sendNewMessage()
+    if (isEditing.value) {
+      await confirmEdit()
+    } else {
+      await sendNewMessage()
+    }
     chatStore.error = null
   } catch (err) {
     chatStore.error = err?.message || 'Ошибка отправки сообщения'
@@ -503,7 +482,9 @@ async function loadMore() {
   if (container) container.scrollTop = container.scrollHeight - prevH
 }
 
-onMounted(initChat)
+onMounted(() => {
+  initChat()
+})
 watch(() => route.params.conversationId, initChat)
 watch(() => route.params.adId, initChat)
 
@@ -515,13 +496,10 @@ watch(() => chatStore.lastKnownId, (newId, oldId) => {
   if (newId && oldId && Number(newId) > Number(oldId)) {
     nextTick(() => {
       const newestMessage = chatStore.messages[chatStore.messages.length - 1] || null
-      if (scrollManager.isAtBottom.value) {
-        scrollManager.scrollToBottom()
-      } else {
-        scrollManager.hasNewBelow.value = true
-        if (!unreadDividerId.value && newestMessage && !isMine(newestMessage)) {
-          unreadDividerId.value = newestMessage.id
-        }
+      const isOwn = newestMessage ? isMine(newestMessage) : true
+      scrollManager.onNewMessageArrived(newestMessage?.id, isOwn)
+      if (!scrollManager.isAtBottom.value && !unreadDividerId.value && newestMessage && !isOwn) {
+        unreadDividerId.value = newestMessage.id
       }
     })
   }
@@ -529,10 +507,9 @@ watch(() => chatStore.lastKnownId, (newId, oldId) => {
 
 onBeforeUnmount(() => {
   const prevConvId = chatStore.currentConversation?.id
-  if (prevConvId) notificationsStore.leaveConversation(prevConvId)
+  if (prevConvId) presenceStore.leaveGroup(prevConvId)
   readTracker.cleanup()
   try { delete window.__chatStore } catch {}
-  try { delete window.__sendOutgoing } catch {}
   for (const m of chatStore.messages || []) cleanupMessagePreviews(m)
   mediaViewer.close()
   try { for (const att of composer.attachments || []) if (isFileObject(att)) revokeFilePreview(att) } catch {}
@@ -543,7 +520,7 @@ const currentConv = computed(() => chatStore.currentConversation)
 const selectedConversationId = computed(() => String(route.params.conversationId || ''))
 const isConversationSelected = computed(() => Boolean(selectedConversationId.value || isPendingConversation.value))
 
-const adImageUrl = computed(() => buildUrl(currentConv.value?.ad?.mainImagePath))
+const adImageUrl = computed(() => buildUrl(currentConv.value?.ad?.image ?? currentConv.value?.ad?.mainImagePath))
 const adLink = computed(() => currentConv.value?.ad?.id ? `/ads/${currentConv.value.ad.id}` : null)
 
 const moderation = computed(() => {
@@ -558,22 +535,60 @@ const moderation = computed(() => {
   return { label, cls }
 })
 
-const counterpart = computed(() => {
-  const o = currentConv.value?.opponent
-  if (!o) return null
-  return { id: o.id, name: o.userName || o.userLogin || 'Собеседник', avatar: buildUrl(o.avatarPath), lastActivityAt: o.lastActivityAt || null }
+const companion = computed(() => {
+  const user = currentConv.value?.companion
+  if (!user) return null
+  return { id: user.id, name: user.name ?? user.userName ?? user.userLogin ?? null, avatar: buildUrl(user.avatar), lastActivityAt: user.lastActivityAt ?? null, isOnline: user.isOnline ?? null }
 })
+
+const typingUsers = computed(() => typingStore.getTypingUsers(conversationId.value))
+const companionTyping = computed(() => typingUsers.value.length > 0)
+
+const typingIndicatorText = computed(() => {
+  if (!typingUsers.value.length) return '8888'
+
+  const names = typingUsers.value
+    .map(item => String(item.userName ?? item.userId ?? '').trim())
+    .filter(Boolean)
+
+  if (!names.length) return '88888'
+  if (names.length === 1) return `${names[0]} печатает...`
+  return `${names.join(', ')} печатают...`
+})
+
+const lastSeenText = computed(() => {
+  if (!presenceStore.isPresenceReady) return '...'
+  if (companionTyping.value) return typingIndicatorText.value
+  if (presenceStore.isOnline(conversationId.value, companion.value?.id)) return 'в сети'
+  const last = companion.value?.lastActivityAt
+  if (!last) return 'был(а) давно'
+  return timeAgo(last, { prefix: 'Был(а) в сети ' })
+})
+
+const lastSeenClass = computed(() => {
+  if (!presenceStore.isPresenceReady) return 'text-secondary'
+  if (companionTyping.value) return 'text-primary'
+  if (presenceStore.isOnline(conversationId.value, companion.value?.id)) return 'text-success'
+  return 'text-secondary'
+})
+
+function onTextareaInput(e) {
+  autoResize(e)
+  const cid = chatStore.currentConversation?.id
+  if (cid) presenceStore.handleTypingInput(cid)
+}
 
 </script>
 
 <template>
-  <div class="container-fluid px-3 px-lg-4 py-3 py-lg-4">
-    <div class="mx-auto rounded-5 border bg-body-tertiary shadow-lg overflow-hidden" style="max-width: 1280px; height: calc(100vh - 90px); min-height: 540px;">
-      <div class="d-flex flex-column flex-lg-row h-100 gap-3 p-3 p-lg-4" style="min-height: 0;">
+  <div class="h-100 d-flex flex-column" style="min-height: 0;">
+  <div class="container-fluid px-3 px-lg-4 py-3 py-lg-4 d-flex flex-column" style="flex: 1; min-height: 0;">
+    <div class="mx-auto w-100 rounded-5 border bg-body-tertiary shadow-lg d-flex flex-column" style="max-width: 1280px; flex: 1; min-height: 0;">
+      <div class="d-flex flex-column flex-lg-row flex-grow-1 gap-3 p-3 p-lg-4" style="min-height: 0;">
         <!-- Список диалогов слева. -->
         <aside
           class="d-flex flex-column bg-white rounded-4 shadow-sm overflow-hidden"
-          style="flex: 0 0 34%; min-width: 320px; max-width: 420px; min-height: 0;"
+          style="flex: 0 0 100%; min-width: 320px; max-width: 420px; min-height: 0;"
           :class="isConversationSelected ? 'd-none d-lg-flex' : 'd-flex'"
         >
           <!-- Заголовок и счётчик чатов. -->
@@ -613,8 +628,8 @@ const counterpart = computed(() => {
               <div class="d-flex align-items-start gap-3">
                 <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
                   <img
-                    v-if="conv.ad?.mainImagePath"
-                    v-intersect-lazy="buildUrl(conv.ad.mainImagePath)"
+                    v-if="conv.ad?.image || conv.ad?.mainImagePath"
+                    v-intersect-lazy="buildUrl(conv.ad.image ?? conv.ad.mainImagePath)"
                     alt="ad"
                     class="w-100 h-100"
                     style="object-fit: cover;"
@@ -623,16 +638,16 @@ const counterpart = computed(() => {
                     v-else
                     class="w-100 h-100 d-flex align-items-center justify-content-center fw-semibold text-primary"
                   >
-                    {{ getInitial(conv.displayTitle || conv.counterpartName || conv.title, conv.id) }}
+                    {{ getInitial(conv.companion?.name || conv.ad?.title, conv.id) }}
                   </div>
                 </div>
 
                 <div class="flex-grow-1 min-w-0">
                   <div class="d-flex align-items-start justify-content-between gap-2 mb-1">
-                    <span class="fw-semibold text-truncate">{{ conv.counterpartName || conv.displayTitle || conv.title || `Разговор #${conv.id}` }}</span>
-                    <small class="text-secondary flex-shrink-0">{{ chatTime(conv.last_message_at || conv.lastMessageAt || conv.lastMessageTimestamp) }}</small>
+                    <span class="fw-semibold text-truncate">{{ conv.ad?.title || conv.companion?.name }}</span>
+                    <small class="text-secondary flex-shrink-0">{{ chatTime(conv.lastMessageAt) }}</small>
                   </div>
-                  <div class="small text-secondary text-truncate">{{ conv.adTitle || conv.displayMeta || `Объявление #${conv.adId}` }}</div>
+                  <div class="small text-secondary text-truncate">{{ conv.ad?.title || `Объявление #${conv.ad?.id}` }}</div>
                   <div class="d-flex align-items-center justify-content-between gap-2 mt-2">
                     <small class="text-secondary text-truncate">{{ convLastLabel(conv) }}</small>
                     <span v-if="conv.unreadCount" class="badge rounded-pill text-bg-primary flex-shrink-0">{{ conv.unreadCount }}</span>
@@ -655,14 +670,15 @@ const counterpart = computed(() => {
           <div v-if="chatStore.currentConversation || isPendingConversation" class="d-flex flex-column h-100">
             <!-- Шапка диалога с собеседником и действиями. -->
             <div class="bg-white border-bottom px-3 px-lg-4 py-3 d-flex align-items-start justify-content-between gap-3">
-              <component :is="counterpart?.id ? 'router-link' : 'div'" :to="counterpart?.id ? `/profile/${counterpart.id}` : null" class="d-flex align-items-center gap-3 text-decoration-none text-body min-w-0">
+              <button class="btn d-lg-none me-2" type="button" @click="isSidebarOpen = true">☰</button>
+              <component :is="companion?.id ? 'router-link' : 'div'" :to="companion?.id ? `/profile/${companion.id}` : null" class="d-flex align-items-center gap-3 text-decoration-none text-body min-w-0">
                 <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 44px; height: 44px;">
-                  <img v-if="counterpart?.avatar" v-intersect-lazy="counterpart.avatar" class="w-100 h-100" style="object-fit: cover;" alt="">
-                  <span v-else class="fw-semibold text-secondary">{{ getInitial(counterpart?.name, '') }}</span>
+                  <img v-if="companion?.avatar" v-intersect-lazy="companion.avatar" class="w-100 h-100" style="object-fit: cover;" alt="">
+                  <span v-else class="fw-semibold text-secondary">{{ getInitial(companion?.name, '') }}</span>
                 </div>
                 <div class="min-w-0">
-                  <div class="fw-semibold text-truncate">{{ counterpart?.name }}</div>
-                  <div class="small text-secondary text-truncate">{{ counterpart?.lastActivityAt ? timeAgo(counterpart.lastActivityAt, { prefix: 'Был(а) в сети ' }) : 'Был(а) в сети неизвестно' }}</div>
+                  <div class="fw-semibold text-truncate">{{ companion?.name }}</div>
+                  <div class="small text-truncate" :class="lastSeenClass">{{ lastSeenText }}</div>
                 </div>
               </component>
 
@@ -673,20 +689,20 @@ const counterpart = computed(() => {
                   </svg>
                 </button>
                 <ul class="dropdown-menu dropdown-menu-end shadow-sm border-0">
-                  <li><button class="dropdown-item" type="button" @click="toggleMute">{{ currentConv?.muted ? 'Включить уведомления' : 'Выключить уведомления' }}</button></li>
-                  <li><button class="dropdown-item" type="button" @click="toggleArchive">{{ currentConv?.archived ? 'Разархивировать' : 'Архивировать' }}</button></li>
+                  <li><button class="dropdown-item" type="button" @click="toggleMute">{{ currentConv?.isMuted ? 'Включить уведомления' : 'Выключить уведомления' }}</button></li>
+                  <li><button class="dropdown-item" type="button" @click="toggleArchive">{{ currentConv?.isArchived ? 'Разархивировать' : 'Архивировать' }}</button></li>
                 </ul>
               </div>
             </div>
 
             <!-- Карточка объявления, если чат привязан к ad. -->
-            <div v-if="currentConv?.adTitle" class="bg-white border-bottom px-3 px-lg-4 py-3 d-flex align-items-center gap-3">
+            <div v-if="currentConv?.ad?.title" class="bg-white border-bottom px-3 px-lg-4 py-3 d-flex align-items-center gap-3">
               <component :is="adLink ? 'router-link' : 'div'" :to="adLink" class="rounded-4 overflow-hidden bg-body-secondary border flex-shrink-0 text-decoration-none" style="width: 52px; height: 52px;">
                 <img v-if="adImageUrl" v-intersect-lazy="adImageUrl" class="w-100 h-100" style="object-fit: cover;" alt="item">
               </component>
               <div class="min-w-0 flex-grow-1 d-flex align-items-center justify-content-between gap-3">
                 <div class="min-w-0">
-                  <component :is="adLink ? 'router-link' : 'div'" :to="adLink" class="d-block fw-semibold text-truncate text-body text-decoration-none">{{ currentConv.adTitle }}</component>
+                  <component :is="adLink ? 'router-link' : 'div'" :to="adLink" class="d-block fw-semibold text-truncate text-body text-decoration-none">{{ currentConv.ad.title }}</component>
                   <div class="small text-secondary">{{ currentConv.ad?.price != null ? currentConv.ad.price + ' р.' : 'Цена не указана' }}</div>
                 </div>
                 <span class="badge rounded-pill" :class="moderation.cls">{{ moderation.label }}</span>
@@ -730,7 +746,7 @@ const counterpart = computed(() => {
                     :class="[
                       getMessageBubbleClass(msg),
                       msg.deleted || msg.deletedAt ? 'opacity-50' : '',
-                      msg.clientStatus === 'sending' || msg.clientStatus === 'editing' ? 'opacity-75' : ''
+                      msg.status === 'sending' || msg.status === 'editing' ? 'opacity-75' : ''
                     ]"
                     :style="isMine(msg)
                       ? 'border-bottom-right-radius: 0.2rem !important;'
@@ -748,65 +764,81 @@ const counterpart = computed(() => {
                         <template v-else>
                           <div class="fw-semibold text-truncate">Ответ на сообщение #{{ msg.replyToMessageId }}</div>
                         </template>
-                        <button type="button" class="btn btn-link p-0 small text-decoration-none" @click="scrollToMessage(msg.replyToMessageId)">Перейти к сообщению</button>
+                        <button type="button" class="btn btn-link p-0 small text-decoration-none" @click="scrollManager.scrollToMessage(msg.replyToMessageId)">Перейти к сообщению</button>
                       </div>
 
-                      <!-- Универсальная галерея (картинки + видео) -->
-                      <div
-                        v-if="getMediaAttachments(msg).length"
-                        class="d-flex flex-wrap gap-2"
-                        style="justify-content: flex-start;"
-                      >
-                        <button
-                          v-for="(att, i) in getMediaAttachments(msg)"
-                          :key="`${msg.id}-${att}-${i}`"
-                          type="button"
-                          class="btn p-0 border border-primary-subtle shadow-sm overflow-hidden rounded-4 bg-white"
-                          :style="{ width: '174px', flexShrink: 0, transition: 'transform 0.18s ease, box-shadow 0.18s ease' }"
-                          :aria-label="isVideoAttachment(att) ? 'Открыть видео' : 'Открыть изображение'"
-                          :title="isVideoAttachment(att) ? 'Открыть видео' : 'Открыть изображение'"
-                          @click="openMediaViewer(msg, i)"
-                        >
-                          <div class="ratio ratio-4x3" style="width: 174px;">
-                            <div
-                              class="position-relative w-100 h-100 overflow-hidden"
-                              style="background: linear-gradient(180deg, rgba(248, 249, 250, 1) 0%, rgba(236, 242, 255, 1) 100%);"
-                            >
-                              <!-- Картинка -->
-                              <img
-                                v-if="isImageAttachment(att)"
-                                v-intersect-lazy="buildUrl(att)"
-                                class="w-100 h-100 d-block"
-                                style="object-fit: cover;"
-                                decoding="async"
-                                alt="Вложение"
-                              />
+                      <!-- ГАЛЕРЕЯ -->
+                      <div v-if="getMediaAttachments(msg).length" class="mt-2 w-100">
 
-                              <!-- Видео -->
-                              <video
-                                v-else-if="isVideoAttachment(att)"
-                                preload="metadata"
-                                playsinline
-                                class="w-100 h-100 d-block"
-                                style="object-fit: cover; background: black;"
-                              >
-                                <source :src="buildUrl(att)" />
-                              </video>
+  <!-- 1 — на всю ширину, ограничена по высоте -->
+  <div v-if="getMediaAttachments(msg).length === 1">
+    <button class="btn p-0 border border-primary-subtle rounded-4 overflow-hidden bg-white w-100" @click="openMediaViewer(msg, 0)">
+      <img v-if="isImageAttachment(getMediaAttachments(msg)[0])" :src="buildUrl(getMediaAttachments(msg)[0])" class="w-100 d-block" style="max-height: 320px; object-fit: cover;" />
+      <div v-else class="position-relative w-100">
+        <div v-if="isMediaBroken(msg, getMediaAttachments(msg)[0], 0)" class="w-100 d-flex justify-content-center align-items-center" style="aspect-ratio:16/9;">
+          <span class="small text-muted">Видео недоступно</span>
+        </div>
+        <template v-else>
+          <video class="w-100 d-block" style="max-height: 320px; background:#000;" preload="metadata" playsinline @loadeddata="clearBrokenMedia(msg, getMediaAttachments(msg)[0], 0)" @error="markMediaBroken(msg, getMediaAttachments(msg)[0], 0)">
+            <source :src="buildUrl(getMediaAttachments(msg)[0])" />
+          </video>
+          <div class="position-absolute top-50 start-50 translate-middle" style="width:56px;height:56px;border-radius:50%;background:rgba(255,255,255,.75);backdrop-filter:blur(4px);box-shadow:0 0 0 2px rgba(0,180,255,.4);pointer-events:none;display:flex;align-items:center;justify-content:center;">
+            <div style="width:0;height:0;border-left:12px solid #000;border-top:8px solid transparent;border-bottom:8px solid transparent;margin-left:3px;"></div>
+          </div>
+        </template>
+      </div>
+    </button>
+  </div>
 
-                              <span
-                                v-if="isVideoAttachment(att)"
-                                class="position-absolute top-50 start-50 translate-middle rounded-circle border border-primary-subtle shadow-sm d-inline-flex align-items-center justify-content-center text-primary pe-none"
-                                style="width: 44px; height: 44px; background: rgba(255, 255, 255, 0.76); backdrop-filter: blur(10px);"
-                                aria-hidden="true"
-                              >
-                                <svg viewBox="0 0 24 24" width="17" height="17" fill="currentColor" role="presentation" focusable="false">
-                                  <path d="M8 5.5v13l11-6.5-11-6.5z"></path>
-                                </svg>
-                              </span>
-                            </div>
-                          </div>
-                        </button>
-                      </div>
+  <!-- 2+ — тайловая сетка, aspect-ratio фиксирует высоту пропорционально ширине -->
+  <div v-else class="d-flex flex-wrap gap-1" style="min-width:0;">
+    <button
+      v-for="(att, i) in getMediaAttachments(msg)"
+      :key="i"
+      class="btn p-0 border border-primary-subtle rounded-3 overflow-hidden bg-white flex-fill"
+      :style="getMediaAttachments(msg).length === 2
+        ? 'min-width:0; flex-basis: calc(50% - 4px); max-width: calc(50% - 4px);'
+        : getMediaAttachments(msg).length === 3
+          ? (i === 0 ? 'min-width:0; flex-basis:100%; max-width:100%;' : 'min-width:0; flex-basis:calc(50% - 4px); max-width:calc(50% - 4px);')
+          : getMediaAttachments(msg).length === 4
+            ? 'min-width:0; flex-basis:calc(50% - 4px); max-width:calc(50% - 4px);'
+            : 'min-width:0; flex-basis:calc(33.333% - 5px); max-width:calc(33.333% - 5px);'
+      "
+      @click="openMediaViewer(msg, i)"
+    >
+      <img
+        v-if="isImageAttachment(att)"
+        :src="buildUrl(att)"
+        class="w-100 d-block"
+        :style="getMediaAttachments(msg).length === 3 && i === 0
+          ? 'aspect-ratio:16/9; object-fit:cover;'
+          : 'aspect-ratio:1/1; object-fit:cover;'"
+      />
+      <div v-else class="position-relative w-100">
+        <div v-if="isMediaBroken(msg, att, i)" class="w-100 d-flex justify-content-center align-items-center" :style="getMediaAttachments(msg).length === 3 && i === 0 ? 'aspect-ratio:16/9;' : 'aspect-ratio:1/1;'">
+          <span class="small text-muted">Видео недоступно</span>
+        </div>
+        <template v-else>
+          <video
+            class="w-100 d-block"
+            :style="(getMediaAttachments(msg).length === 3 && i === 0 ? 'aspect-ratio:16/9;' : 'aspect-ratio:1/1;') + ' object-fit:cover; background:#000;'"
+            preload="metadata"
+            playsinline
+            @loadeddata="clearBrokenMedia(msg, att, i)"
+            @error="markMediaBroken(msg, att, i)"
+          >
+            <source :src="buildUrl(att)" />
+          </video>
+          <div class="position-absolute top-50 start-50 translate-middle" style="width:40px;height:40px;border-radius:50%;background:rgba(255,255,255,.75);backdrop-filter:blur(4px);box-shadow:0 0 0 2px rgba(0,180,255,.4);pointer-events:none;display:flex;align-items:center;justify-content:center;">
+            <div style="width:0;height:0;border-left:10px solid #000;border-top:6px solid transparent;border-bottom:6px solid transparent;margin-left:2px;"></div>
+          </div>
+        </template>
+      </div>
+    </button>
+  </div>
+
+</div>
+                      
 
                       <!-- Аудио-вложения сообщения. -->
                       <template v-if="getAudioAttachments(msg).length">
@@ -814,10 +846,10 @@ const counterpart = computed(() => {
                           <div
                             v-for="(att, i) in getAudioAttachments(msg)"
                             :key="`${msg.id}-audio-${i}`"
-                            class="w-100 min-w-0 overflow-hidden bg-white border border-light-subtle rounded-5 p-3 shadow-sm"
+                            class="w-100 min-w-0 overflow-hidden bg-white border border-light-subtle rounded-5 p-2 shadow-sm"
                           >
-                            <div class="d-flex align-items-center gap-3 mb-3 min-w-0 overflow-hidden">
-                              <span class="flex-shrink-0 rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center border-0 shadow-sm" style="width: 40px; height: 40px;">{{ getAttachmentKindEmoji(att) }}</span>
+                            <div class="d-flex align-items-center gap-2 mb-3 min-w-0 overflow-hidden">
+                              <span class="flex-shrink-0 rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center border-0 shadow-sm" style="width: 40px; height: 40px; opacity: 0.7">{{ getAttachmentKindEmoji(att) }}</span>
                               <div class="min-w-0 flex-grow-1 overflow-hidden">
                                 <div class="fw-semibold text-truncate d-block" :title="getAttachmentName(att)">{{ getAttachmentName(att) }}</div>
                                 <div class="small text-secondary text-truncate d-block">{{ getAttachmentKindLabel(att) }}</div>
@@ -863,13 +895,13 @@ const counterpart = computed(() => {
                         style="white-space: pre-wrap;"
                       >{{ msg.text }}</p>
 
-                      <div v-if="isMessageBusy(msg) || msg.clientStatus === 'failed'" class="d-flex align-items-center justify-content-between gap-2 flex-wrap mt-2 small">
+                      <div v-if="isMessageBusy(msg) || msg.status === 'failed'" class="d-flex align-items-center justify-content-between gap-2 flex-wrap mt-2 small">
                         <span v-if="isMessageBusy(msg)" class="text-secondary d-inline-flex align-items-center gap-2">
                           <span class="spinner-border spinner-border-sm" style="width: 0.7rem; height: 0.7rem;" role="status" aria-hidden="true"></span>
                           {{ getMessagePreviewLabel(msg) }}
                         </span>
                         <span v-else class="text-danger">{{ getMessagePreviewLabel(msg) }}</span>
-                        <button v-if="msg.clientStatus === 'failed'" type="button" class="btn btn-link btn-sm p-0 text-primary text-decoration-none" @click="retryPendingMessage(msg)">Повторить</button>
+                        <button v-if="msg.status === 'failed'" type="button" class="btn btn-link btn-sm p-0 text-primary text-decoration-none" @click="retryMessage(msg)">Повторить</button>
                       </div>
                     </div>
 
@@ -890,15 +922,19 @@ const counterpart = computed(() => {
               </div>
               </template>
 
-              <div v-if="scrollManager.hasNewBelow.value" class="text-center" style="position: sticky; bottom: 8px; z-index: 5;">
-                <button type="button" class="btn btn-primary btn-sm rounded-pill shadow px-3" @click="scrollManager.scrollToBottom()">
-                  ↓ Новые сообщения
+              <div v-if="scrollManager.hasNewBelow.value || !scrollManager.isAtBottom.value" class="text-center" style="position: sticky; bottom: 8px; z-index: 5;">
+                <button type="button" class="btn btn-primary btn-sm rounded-pill shadow px-3" @click="scrollManager.scrollToUnreadOrBottom()">
+                  ↓ {{ scrollManager.hasNewBelow.value ? 'Новые сообщения' : 'Вниз' }}
                 </button>
               </div>
             </div>
 
             <!-- Панель отправки и редактирования сообщения. -->
             <div class="bg-white border-top p-3 p-lg-4">
+              <div v-if="companionTyping" class="small text-primary mb-2 d-flex align-items-center gap-2">
+                <span class="spinner-grow spinner-grow-sm" style="width: 0.5rem; height: 0.5rem;" role="status"></span>
+                {{ typingIndicatorText }}
+              </div>
               <div v-if="composerMode === 'edit'" class="d-flex align-items-center justify-content-between gap-3 rounded-4 border bg-warning-subtle px-3 py-2 mb-3 small">
                 <span class="text-secondary">✏️ Редактирование сообщения</span>
                 <button type="button" class="btn-close btn-sm" @click="cancelEdit"></button>
@@ -913,9 +949,9 @@ const counterpart = computed(() => {
                     <video :src="buildUrl(att)" class="w-100 h-100" controls preload="metadata" playsinline style="border-radius: .6rem; object-fit: cover; background: #000"></video>
                     <button type="button" class="btn btn-dark btn-sm position-absolute top-0 end-0 m-2 rounded-circle border-0 d-inline-flex align-items-center justify-content-center shadow-sm" style="width: 26px; height: 26px; line-height: 1; font-size: 0.8rem;" @click="removeAttachment(index)" title="Удалить видео">×</button>
                   </div>
-                  <div v-else-if="isAudioAttachment(att)" class="w-100 min-w-0 overflow-hidden bg-white border border-light-subtle rounded-5 p-3 shadow-sm d-flex flex-column gap-3">
-                    <div class="d-flex align-items-center gap-3 min-w-0 overflow-hidden">
-                      <span class="flex-shrink-0 rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center border-0 shadow-sm" style="width: 40px; height: 40px;">{{ getAttachmentKindEmoji(att) }}</span>
+                  <div v-else-if="isAudioAttachment(att)" class="w-100 min-w-0 overflow-hidden bg-white border border-light-subtle rounded-5 p-2 shadow-sm d-flex flex-column gap-2">
+                    <div class="d-flex align-items-center gap-2 min-w-0 overflow-hidden">
+                      <span class="flex-shrink-0 rounded-circle bg-primary-subtle text-primary d-inline-flex align-items-center justify-content-center border-0 shadow-sm" style="width: 40px; height: 40px; opacity: 0.7">{{ getAttachmentKindEmoji(att) }}</span>
                       <div class="min-w-0 flex-grow-1 overflow-hidden">
                         <div class="fw-semibold text-truncate d-block" :title="getAttachmentName(att)">{{ getAttachmentName(att) }}</div>
                         <div class="small text-secondary text-truncate d-block">{{ getAttachmentKindLabel(att) }}</div>
@@ -944,7 +980,7 @@ const counterpart = computed(() => {
                   placeholder="Написать сообщение..."
                   style="resize: none; overflow-y: auto; min-height: 44px; max-height: 140px;"
                   @keydown.enter.exact.prevent="onSubmit"
-                  @input="autoResize"
+                  @input="onTextareaInput"
                 ></textarea>
                 <button
                   type="submit"
@@ -965,6 +1001,90 @@ const counterpart = computed(() => {
             </div>
           </div>
         </section>
+      </div>
+    </div>
+  </div>
+
+  <div class="d-lg-none">
+    <div
+      v-if="isSidebarOpen"
+      class="position-fixed top-0 start-0 w-100 h-100"
+      style="background: rgba(0,0,0,0.35); z-index: 1040;"
+      @click="isSidebarOpen = false"
+    ></div>
+
+    <div
+      class="position-fixed top-0 start-0 h-100 bg-white shadow d-flex flex-column"
+      :style="{
+        width: '280px',
+        zIndex: 1050,
+        transform: isSidebarOpen ? 'translateX(0)' : 'translateX(-100%)',
+        transition: 'transform 0.25s ease'
+      }"
+    >
+      <div class="px-3 py-3 border-bottom d-flex align-items-center justify-content-between">
+        <div class="fw-semibold">Чаты</div>
+        <button class="btn-close" type="button" @click="isSidebarOpen = false"></button>
+      </div>
+
+      <div v-if="chatStore.error && !chatStore.currentConversation" class="m-3 alert alert-danger mb-0">{{ chatStore.error }}</div>
+
+      <div v-if="chatStore.isLoading && !chatStore.conversations.length" class="flex-grow-1 d-flex align-items-center justify-content-center text-center text-secondary py-5">
+        <div>
+          <div class="spinner-border text-secondary mb-3" role="status"></div>
+          <div class="small">Загрузка...</div>
+        </div>
+      </div>
+
+      <div v-else-if="!chatStore.conversations.length" class="flex-grow-1 d-flex align-items-center justify-content-center text-center text-secondary px-4 py-5">
+        <div>
+          <div class="fw-semibold mb-1">Нет активных чатов</div>
+          <div class="small">Здесь появятся разговоры по вашим объявлениям.</div>
+        </div>
+      </div>
+
+      <div v-else class="flex-grow-1 overflow-auto p-2">
+        <button
+          v-for="conv in chatStore.conversations"
+          :key="conv.id"
+          type="button"
+          class="btn w-100 text-start border rounded-4 p-3 mb-2 bg-white shadow-sm"
+          :class="String(conv.id) === selectedConversationId ? 'border-primary bg-primary-subtle' : 'border-white'"
+          @click="selectConversation(conv.id); isSidebarOpen = false"
+        >
+          <div class="d-flex align-items-start gap-3">
+            <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
+              <img
+                v-if="conv.ad?.image || conv.ad?.mainImagePath"
+                v-intersect-lazy="buildUrl(conv.ad.image ?? conv.ad.mainImagePath)"
+                alt="ad"
+                class="w-100 h-100"
+                style="object-fit: cover;"
+              />
+              <div
+                v-else
+                class="w-100 h-100 d-flex align-items-center justify-content-center fw-semibold text-primary"
+              >
+                {{ getInitial(conv.companion?.name || conv.ad?.title, conv.id) }}
+              </div>
+            </div>
+
+            <div class="flex-grow-1 min-w-0">
+              <div class="d-flex align-items-start justify-content-between gap-2 mb-1">
+                <span class="fw-semibold text-truncate">{{ conv.companion?.name || conv.ad?.title || `Разговор #${conv.id}` }}</span>
+                <small class="text-secondary flex-shrink-0">{{ chatTime(conv.lastMessageAt) }}</small>
+              </div>
+              <div class="small text-secondary text-truncate">{{ conv.ad?.title || `Объявление #${conv.ad?.id}` }}</div>
+              <div class="d-flex align-items-center justify-content-between gap-2 mt-2">
+                <small class="text-secondary text-truncate">{{ convLastLabel(conv) }}</small>
+                <span v-if="conv.unreadCount" class="badge rounded-pill text-bg-primary flex-shrink-0">{{ conv.unreadCount }}</span>
+              </div>
+              <div v-if="convPreviewUrl(conv)" class="mt-2 rounded-3 overflow-hidden border bg-body-secondary" style="max-width: 86px; height: 48px;">
+                <img v-intersect-lazy="convPreviewUrl(conv)" class="w-100 h-100" style="object-fit: cover;" alt="Preview" />
+              </div>
+            </div>
+          </div>
+        </button>
       </div>
     </div>
   </div>
@@ -1113,5 +1233,6 @@ const counterpart = computed(() => {
           </div>
       </div>
     </div>
+  </div>
   </div>
 </template>

@@ -3,6 +3,7 @@ import { ref, nextTick } from 'vue'
 export function useScrollManager(messagesContainer) {
   const isAtBottom = ref(true)
   const hasNewBelow = ref(false)
+  const firstUnreadId = ref(null)
 
   function checkIsAtBottom() {
     const el = messagesContainer.value
@@ -12,7 +13,10 @@ export function useScrollManager(messagesContainer) {
 
   function updateScrollState() {
     isAtBottom.value = checkIsAtBottom()
-    if (isAtBottom.value) hasNewBelow.value = false
+    if (isAtBottom.value) {
+      hasNewBelow.value = false
+      firstUnreadId.value = null
+    }
   }
 
   function scrollToBottom() {
@@ -22,8 +26,24 @@ export function useScrollManager(messagesContainer) {
         el.scrollTop = el.scrollHeight
         isAtBottom.value = true
         hasNewBelow.value = false
+        firstUnreadId.value = null
       }
     })
+  }
+
+  function scrollToMessage(messageId) {
+    const el = document.getElementById(`message-${messageId}`)
+    if (el) {
+      el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    }
+  }
+
+  function scrollToUnreadOrBottom() {
+    if (hasNewBelow.value && firstUnreadId.value) {
+      scrollToMessage(firstUnreadId.value)
+    } else {
+      scrollToBottom()
+    }
   }
 
   function scrollToAnchorOrBottom(anchorMessageId) {
@@ -40,11 +60,26 @@ export function useScrollManager(messagesContainer) {
     })
   }
 
+  function onNewMessageArrived(messageId, isOwn) {
+    if (isAtBottom.value) {
+      scrollToBottom()
+    } else {
+      hasNewBelow.value = true
+      if (!firstUnreadId.value && !isOwn) {
+        firstUnreadId.value = messageId
+      }
+    }
+  }
+
   return {
     isAtBottom,
     hasNewBelow,
+    firstUnreadId,
     updateScrollState,
     scrollToBottom,
+    scrollToMessage,
+    scrollToUnreadOrBottom,
     scrollToAnchorOrBottom,
+    onNewMessageArrived,
   }
 }

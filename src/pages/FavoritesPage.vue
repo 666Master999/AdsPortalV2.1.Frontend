@@ -1,22 +1,28 @@
 <script setup>
 import { ref, onMounted } from 'vue'
 import { useUserStore } from '../stores/userStore'
-import { useAdsStore } from '../stores/adsStore'
 import AdCard from '../components/AdCard.vue'
 
 const userStore = useUserStore()
-const adsStore = useAdsStore()
 const favorites = ref([])
-const ads = ref([])
+
+function adFromFav(fav) {
+  const source = fav && typeof fav === 'object'
+    ? (fav.ad && typeof fav.ad === 'object' ? fav.ad : fav)
+    : { id: fav?.adId ?? fav?.id ?? null }
+
+  const mainImage = source?.mainImage ? String(source.mainImage).replace(/\\/g, '/') : (source?.mainImageUrl ?? null)
+
+  return {
+    ...source,
+    mainImage,
+    isFavorite: true,
+  }
+}
 
 onMounted(async () => {
   const userId = userStore.user?.userId || userStore.tokenUserId
-  favorites.value = await userStore.getFavorites(userId)
-  if (favorites.value.length) {
-    const ids = favorites.value.map(f => f.adId).join(',')
-    await adsStore.loadAds({ ids })
-    ads.value = adsStore.ads
-  }
+  favorites.value = (await userStore.getFavorites(userId)) || []
 })
 </script>
 
@@ -33,11 +39,11 @@ onMounted(async () => {
 
         <div class="flex-grow-1 overflow-auto p-3 p-lg-4" style="min-height: 0;">
           <div class="row g-4">
-            <div class="col-12 col-sm-6 col-lg-4 col-xxl-3" v-for="ad in ads" :key="ad.id">
-              <AdCard :ad="ad" :allowEdit="false" />
+            <div class="col-12 col-sm-6 col-lg-4 col-xxl-3" v-for="fav in favorites" :key="fav.id ?? fav.adId">
+              <AdCard :ad="adFromFav(fav)" :allowEdit="false" />
             </div>
           </div>
-          <div v-if="!ads.length" class="text-center text-secondary py-5">Избранное пусто</div>
+          <div v-if="!favorites.length" class="text-center text-secondary py-5">Избранное пусто</div>
         </div>
       </div>
     </div>

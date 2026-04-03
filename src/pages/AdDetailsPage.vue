@@ -118,12 +118,32 @@ const isFavorite = ref(false)
 watch(
   () => ad.value?.isFavorite,
   value => {
-    isFavorite.value = Boolean(value)
+    if (value !== undefined && value !== null) {
+      isFavorite.value = Boolean(value)
+    }
   },
   { immediate: true }
 )
 
 const isAdmin = computed(() => Boolean(userStore.isAdmin))
+
+const priceText = computed(() => {
+  if (!ad.value) return ''
+  if (ad.value.isNegotiable) return 'Договорная'
+  const p = ad.value.price
+  if (p === undefined || p === null || p === '') return 'Бесплатно'
+  return `${p} Br`
+})
+
+const cityText = computed(() => {
+  if (!ad.value) return ''
+  const district = ad.value.district
+  const city = ad.value.city
+  if (district?.name && city?.name) return `${district.name}, ${city.name}`
+  if (district?.name) return district.name
+  if (city?.name) return city.name
+  return ''
+})
 
 const canEdit = computed(() => {
   if (!ad.value) return false
@@ -150,20 +170,24 @@ function getImageUrl(path) {
   return `${apiBase}/${path}`
 }
 
-async function refreshFavoriteState() {
+async function refreshFavoriteState(adId) {
+  const serverFavorite = ad.value?.isFavorite
+  if (serverFavorite !== undefined && serverFavorite !== null) {
+    isFavorite.value = Boolean(serverFavorite)
+    return
+  }
+
   const userId = userStore.user?.userId || userStore.tokenUserId
-  if (!userId || !ad.value?.id) {
+  const id = adId ?? ad.value?.id
+  if (!userId || !id) {
     isFavorite.value = false
     return
   }
 
   try {
-    const favorites = await userStore.getFavorites(userId)
-    isFavorite.value = Array.isArray(favorites)
-      ? favorites.some(f => Number(f.adId) === Number(ad.value.id))
-      : false
+    isFavorite.value = await userStore.checkIsFavorite(id)
   } catch (err) {
-    console.error('Failed to load favorites:', err)
+    console.error('Failed to check favorite:', err)
     isFavorite.value = Boolean(ad.value?.isFavorite)
   }
 }
@@ -174,7 +198,7 @@ onMounted(async () => {
 
   try {
     await adsStore.loadAd(route.params.id)
-    await refreshFavoriteState()
+    await refreshFavoriteState(route.params.id)
   } catch (e) {
     // Если объявление недоступно (удалено/нет доступа/не найдено) — показываем сообщение.
     let serverMsg = ''
@@ -190,7 +214,7 @@ onMounted(async () => {
     if (serverMsg.startsWith('{')) {
       try {
         const parsed = JSON.parse(serverMsg)
-        serverMsg = (parsed?.message || parsed?.error || '').toString().trim()
+        serverMsg = String(parsed?.message || parsed?.error || '').trim()
       } catch {
         // оставим как есть
       }
@@ -404,11 +428,11 @@ function setCurrentImage(filePath) {
                         <h2 class="h4 mb-1 fw-semibold">{{ ad.title }}</h2>
                         <p class="text-muted mb-1">
                           <span class="badge bg-secondary me-1">{{ ad.type }}</span>
-                          <span>{{ ad.city }}</span>
+                          <span>{{ cityText }}</span>
                         </p>
                       </div>
                       <div class="text-end">
-                        <p class="h3 text-primary mb-1">{{ ad.isNegotiable ? 'Договорная' : (ad.price ? ad.price + ' Br' : 'Бесплатно') }}</p>
+                        <p class="h3 text-primary mb-1">{{ priceText }}</p>
                         <p class="text-muted small mb-0">
                           <span v-if="ad.updatedAt">Добавлено: {{ timeAgo(ad.updatedAt) }}</span>
                           <span v-else-if="ad.createdAt">Добавлено: {{ timeAgo(ad.createdAt) }}</span>
@@ -421,8 +445,8 @@ function setCurrentImage(filePath) {
                       <button v-if="canEdit" class="btn btn-danger" @click="deleteAd">Удалить</button>
                       <div class="d-flex justify-content-between align-items-center gap-3">
                         <button class="btn btn-primary" @click="writeToSeller">Написать продавцу</button>
-                        <button class="btn btn-sm p-0 border-0 bg-transparent" style="font-size: 1.7rem; line-height: 1" @click="toggleFavorite" :aria-pressed="isFavorite.toString()">
-                          <span :style="{ color: isFavorite ? '#dc3545' : '#adb5bd' }">&#9829;</span>
+                        <button class="btn btn-sm p-0 border-0 bg-transparent" style="font-size: 1.7rem; line-height: 1" @click="toggleFavorite" :aria-pressed="Boolean(isFavorite)">
+                          <span :style="{ color: Boolean(isFavorite) ? '#dc3545' : '#adb5bd' }">&#9829;</span>
                         </button>
                       </div>
                     </div>

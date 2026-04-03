@@ -13,6 +13,17 @@ function parseJwt(token) {
   }
 }
 
+async function parseErrMsg(response, fallback) {
+  const text = await response.text().catch(() => '')
+  if (!text) return fallback
+  try {
+    const json = JSON.parse(text)
+    return json?.message || json?.error || text
+  } catch {
+    return text
+  }
+}
+
 export const useUserStore = defineStore('user', () => {
   const user = ref(JSON.parse(localStorage.getItem('user') || 'null'))
   const token = ref(localStorage.getItem('token') || '')
@@ -53,7 +64,7 @@ export const useUserStore = defineStore('user', () => {
     } catch (_) {
       throw new Error('Сервер недоступен.')
     }
-    if (!res.ok) throw new Error((await res.text()) || 'Ошибка запроса')
+    if (!res.ok) throw new Error(await parseErrMsg(res, 'Ошибка запроса'))
 
     const data = (await res.json()).data
     saveAuth(data)
@@ -143,6 +154,13 @@ export const useUserStore = defineStore('user', () => {
     return res.json()
   }
 
+  async function checkIsFavorite(adId) {
+    const res = await fetch(`${apiBase}/ads/${adId}/is-favorite`, { headers: getAuthHeader() })
+    if (!res.ok) throw new Error(`Request failed (${res.status})`)
+    const data = await res.json()
+    return data.isFavorite
+  }
+
   async function addFavorite(userId, adId) {
     const body = Number.isInteger(adId) ? String(adId) : JSON.stringify(adId)
     const res = await fetch(`${usersBase}/${userId}/favorites`, {
@@ -150,7 +168,7 @@ export const useUserStore = defineStore('user', () => {
       headers: { 'Content-Type': 'application/json', ...getAuthHeader() },
       body,
     })
-    if (!res.ok) { const t = await res.text(); throw new Error(t || `Request failed (${res.status})`) }
+    if (!res.ok) { throw new Error(await parseErrMsg(res, `Request failed (${res.status})`)) }
     return res.json()
   }
 
@@ -160,8 +178,7 @@ export const useUserStore = defineStore('user', () => {
       headers: getAuthHeader(),
     })
     if (!res.ok) {
-      const t = await res.text()
-      throw new Error(t || `Request failed (${res.status})`)
+      throw new Error(await parseErrMsg(res, `Request failed (${res.status})`))
     }
 
     const text = await res.text()
@@ -182,6 +199,7 @@ export const useUserStore = defineStore('user', () => {
     updateProfile,
     saveAuth,
     getFavorites,
+    checkIsFavorite,
     addFavorite,
     removeFavorite,
   }

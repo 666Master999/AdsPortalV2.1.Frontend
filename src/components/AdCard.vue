@@ -19,8 +19,27 @@ const router = useRouter()
 const userStore = useUserStore()
 
 function goToAd() {
-  router.push(`/ads/${props.ad.id}`)
+  if (props.ad?.id) router.push(`/ads/${props.ad.id}`)
 }
+
+const priceText = computed(() => {
+  const a = props.ad
+  if (!a) return ''
+  if (a.isNegotiable) return 'Договорная'
+  const p = a.price
+  if (p === undefined || p === null || p === '') return 'Бесплатно'
+  return `${p} Br`
+})
+
+const cityText = computed(() => {
+  const a = props.ad
+  if (!a) return ''
+  const district = a.district || a.District
+  const city = a.city || a.City
+  if (district?.name) return district.name
+  if (city?.name) return city.name
+  return ''
+})
 
 function resolveModerationStatus(raw) {
   if (raw === undefined || raw === null || raw === '') return ''
@@ -117,16 +136,13 @@ async function toggleFavorite() {
 </script>
 
 <template>
-  <div
-    class="ad-card card h-100 border-0 rounded-4 shadow-sm overflow-hidden bg-white"
-    @click="goToAd"
-  >
+  <div v-if="ad" class="ad-card card h-100 border-0 rounded-4 shadow-sm overflow-hidden bg-white" @click="goToAd">
     <div class="ad-card-media position-relative bg-body-tertiary">
       <img
         v-if="ad.mainImageUrl || ad.mainImage"
         :src="apiBase + '/' + (ad.mainImageUrl || ad.mainImage)"
         class="ad-card-media-image w-100 h-100"
-        :alt="ad.title"
+        :alt="ad.title ?? ''"
         @error="e => e.target.style.display = 'none'"
       />
       <div
@@ -153,16 +169,14 @@ async function toggleFavorite() {
 
     <div class="ad-card-body card-body d-flex flex-column px-3 px-lg-4 py-3">
 
-      <div class="ad-card-price fw-semibold fs-4 text-primary mb-1 lh-1">
-        {{ ad.isNegotiable ? 'Договорная' : (ad.price != null ? ad.price + ' ₽' : '—') }}
-      </div>
+      <div class="ad-card-price fw-semibold fs-4 text-primary mb-1 lh-1">{{ priceText }}</div>
 
-      <h6 class="card-title mb-2 lh-sm fw-semibold text-truncate" :title="ad.title">{{ ad.title }}</h6>
+      <h6 class="card-title mb-2 lh-sm fw-semibold text-truncate" :title="ad.title ?? ''">{{ ad.title }}</h6>
 
       <div class="ad-card-meta d-flex align-items-center gap-2 text-muted small mb-3 flex-wrap">
-        <span v-if="ad.city" class="d-inline-flex align-items-center gap-1">
+        <span v-if="cityText" class="d-inline-flex align-items-center gap-1">
           <span>📍</span>
-          <span class="text-truncate">{{ ad.city }}</span>
+          <span class="text-truncate">{{ cityText }}</span>
         </span>
         <span v-if="ad.updatedAt || ad.createdAt" class="text-secondary">·</span>
         <span>{{ ad.updatedAt ? timeAgo(ad.updatedAt) : (ad.createdAt ? timeAgo(ad.createdAt) : '') }}</span>
@@ -191,6 +205,7 @@ async function toggleFavorite() {
 
     </div>
   </div>
+  <div v-else></div>
 </template>
 
 <style scoped>

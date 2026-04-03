@@ -4,6 +4,8 @@
     import Sortable from 'sortablejs'
     import { useAdsStore } from '../stores/adsStore'
     import { useCategoriesStore } from '../stores/categoriesStore'
+    import LocationAutocomplete from '../components/LocationAutocomplete.vue'
+    import { mapApiToLocation, mapLocationToApi } from '../composables/useLocationMapper'
 
     const adsStore = useAdsStore()
     const categoriesStore = useCategoriesStore()
@@ -17,7 +19,7 @@
     const price = ref('')
     const isNegotiable = ref(false)
     const categoryId = ref('')
-    const city = ref('')
+    const selectedLocation = ref(null)
     const type = ref('')
     const error = ref('')
 
@@ -133,6 +135,18 @@
         })
     }
 
+    function onLocationSelect(item) {
+        if (item?.type === 'preset' && item.id === 'all') {
+            selectedLocation.value = null
+            return
+        }
+        selectedLocation.value = mapApiToLocation(item)[0] ?? null
+    }
+
+    function clearSelectedLocation() {
+        selectedLocation.value = null
+    }
+
     async function handleCreate() {
         try {
             error.value = ''
@@ -147,7 +161,17 @@
                 form.append('price', price.value)
             }
             form.append('categoryId', categoryId.value)
-            form.append('city', city.value)
+            if (selectedLocation.value?.type === 'region') {
+                error.value = 'Выберите город или район'
+                return
+            }
+            const locationPayload = mapLocationToApi(selectedLocation.value)
+            if (locationPayload.CityId != null) {
+                form.append('CityId', String(locationPayload.CityId))
+            }
+            if (locationPayload.DistrictId != null) {
+                form.append('DistrictId', String(locationPayload.DistrictId))
+            }
             form.append('type', type.value)
 
             if (images.value.length > 0) {
@@ -254,8 +278,17 @@
 
                     <div class="row mb-3">
                         <div class="col-md-6">
-                            <label class="form-label">Город</label>
-                            <input v-model="city" type="text" class="form-control" />
+                            <label class="form-label">Местоположение</label>
+                            <LocationAutocomplete
+                                :selected="selectedLocation ? [selectedLocation] : []"
+                                placeholder="Начните вводить город, область или район"
+                                @select="onLocationSelect"
+                            />
+                            <div v-if="selectedLocation" class="d-flex flex-wrap align-items-center gap-2 mt-2">
+                                <span class="badge text-bg-secondary">{{ selectedLocation.label || selectedLocation.name || `${selectedLocation.type}:${selectedLocation.id}` }}</span>
+                                <span v-if="selectedLocation.subtitle" class="small text-secondary">{{ selectedLocation.subtitle }}</span>
+                                <button type="button" class="btn btn-sm btn-outline-secondary" @click="clearSelectedLocation">Очистить</button>
+                            </div>
                         </div>
                         <div class="col-md-6">
                             <label class="form-label">Тип</label>

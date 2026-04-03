@@ -4,6 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import Sortable from 'sortablejs'
 import { useAdsStore } from '../stores/adsStore'
 import { useCategoriesStore } from '../stores/categoriesStore'
+import LocationAutocomplete from '../components/LocationAutocomplete.vue'
+import { mapApiToLocation, mapLocationToApi } from '../composables/useLocationMapper'
 import { getApiBaseUrl } from '../config/apiBase'
 
 const adsStore = useAdsStore()
@@ -25,7 +27,7 @@ const description = ref('')
 const price = ref('')
 const isNegotiable = ref(false)
 const categoryId = ref('')
-const city = ref('')
+const selectedLocation = ref(null)
 const type = ref('')
 const error = ref('')
 
@@ -145,6 +147,28 @@ function revokePreviewUrl(item) {
 function setMainImage(item) {
   if (item.tooMany) return
   images.value.forEach(i => (i.isMain = i.localId === item.localId))
+}
+
+function sameLocationRef(a, b) {
+  if (!a && !b) return true
+  if (!a || !b) return false
+  return a.type === b.type && Number(a.id) === Number(b.id)
+}
+
+function resolveInitialLocation(adData) {
+  return mapApiToLocation(adData)[0] ?? null
+}
+
+function onLocationSelect(item) {
+  if (item?.type === 'preset' && item.id === 'all') {
+    selectedLocation.value = null
+    return
+  }
+  selectedLocation.value = mapApiToLocation(item)[0] ?? null
+}
+
+function clearSelectedLocation() {
+  selectedLocation.value = null
 }
 
 function initSortable() {
@@ -296,7 +320,18 @@ async function handleUpdate() {
     if (isNegotiable.value !== Boolean(initialAd.value.isNegotiable)) payload.isNegotiable = isNegotiable.value
     if (price.value !== initialAd.value.price) payload.price = price.value
     if (categoryId.value !== initialAd.value.categoryId) payload.categoryId = categoryId.value
-    if (city.value !== initialAd.value.city) payload.city = city.value
+    if (selectedLocation.value?.type === 'region') {
+      error.value = 'Выберите город или район'
+      return
+    }
+    if (!sameLocationRef(selectedLocation.value, initialAd.value.location)) {
+      if (!selectedLocation.value) {
+        payload.CityId = null
+        payload.DistrictId = null
+      } else {
+        Object.assign(payload, mapLocationToApi(selectedLocation.value))
+      }
+    }
     if (type.value !== initialAd.value.type) payload.type = type.value
 
     if (imagesPayload.length) {
@@ -333,9 +368,10 @@ onMounted(async () => {
   price.value = adData.price || ''
   isNegotiable.value = Boolean(adData.isNegotiable)
   categoryId.value = adData.categoryId || ''
-  city.value = adData.city || ''
   type.value = adData.type || ''
 
+  selectedLocation.value = resolveInitialLocation(adData)
+  initialAd.value = { ...adData, location: selectedLocation.value }
   const existing = (adData.images || []).map(img =>
     createImageItem({
       id: img.id,
@@ -415,8 +451,17 @@ onBeforeUnmount(() => {
 
           <div class="row mb-3">
             <div class="col-md-6">
-              <label class="form-label">Город</label>
-              <input v-model="city" type="text" class="form-control" />
+              <label class="form-label">Местоположение</label>
+              <LocationAutocomplete
+                :selected="selectedLocation ? [selectedLocation] : []"
+                placeholder="Начните вводить город, область или район"
+                @select="onLocationSelect"
+              />
+              <div v-if="selectedLocation" class="d-flex flex-wrap align-items-center gap-2 mt-2">
+                <span class="badge text-bg-secondary">{{ selectedLocation.label || selectedLocation.name || `${selectedLocation.type}:${selectedLocation.id}` }}</span>
+                <span v-if="selectedLocation.subtitle" class="small text-secondary">{{ selectedLocation.subtitle }}</span>
+                <button type="button" class="btn btn-sm btn-outline-secondary" @click="clearSelectedLocation">Очистить</button>
+              </div>
             </div>
             <div class="col-md-6">
               <label class="form-label">Тип</label>

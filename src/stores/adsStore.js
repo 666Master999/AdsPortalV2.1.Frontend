@@ -1,46 +1,127 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import { getApiBaseUrl } from '../config/apiBase'
+import { fetchDeduped } from '../utils/fetchDeduped'
+
+async function parseErrMsg(response, fallback) {
+  const text = await response.text().catch(() => '')
+  if (!text) return fallback
+  try {
+    const json = JSON.parse(text)
+    return json?.message || json?.error || text
+  } catch {
+    return text
+  }
+}
 
 export const useAdsStore = defineStore('ads', () => {
   const ads = ref([])
   const selectedAd = ref(null)
+  const totalCount = ref(0)
+  const page = ref(1)
+  const pageSize = ref(20)
+  const totalPages = ref(0)
+  const isLoading = ref(false)
   const apiBase = getApiBaseUrl()
+  let _currentRequestId = 0
+  let _currentListController = null
+  let _currentListPromise = null
+  let _currentListKey = ''
+
+  function buildListSearchParams(params = {}) {
+    const urlParams = new URLSearchParams()
+    for (const [k, v] of Object.entries(params)) {
+      if (v === undefined || v === null || v === '') continue
+      urlParams.append(k, String(v))
+    }
+    urlParams.sort()
+    return urlParams
+  }
 
   function getAuthHeaders() {
     const token = localStorage.getItem('token')
     return token ? { Authorization: `Bearer ${token}` } : {}
   }
 
-  async function loadAds(params = {}) {
-    const normalized = { ...params }
-    if (Array.isArray(normalized.ids)) normalized.ids = normalized.ids.join(',')
-    const query = new URLSearchParams(normalized).toString()
-    const response = await fetch(`${apiBase}/ads?${query}`, {
-      headers: getAuthHeaders(),
-    })
+  function extractList(data) {
+    if (Array.isArray(data)) return { items: data, total: data.length }
+    if (Array.isArray(data?.items)) return { items: data.items, total: data.totalCount ?? data.total ?? data.items.length }
+    if (Array.isArray(data?.data)) return { items: data.data, total: data.totalCount ?? data.total ?? data.data.length }
+    return { items: [], total: 0 }
+  }
 
-    if (!response.ok) {
-      ads.value = []
-      const errorText = await response.text().catch(() => '')
-      throw new Error(errorText || `Request failed (${response.status})`)
+  async function loadAds(params = {}) {
+    const urlParams = buildListSearchParams(params)
+    const requestKey = urlParams.toString()
+
+    if (_currentListPromise && requestKey === _currentListKey) {
+      return _currentListPromise
     }
 
-    ads.value = await response.json()
+    if (_currentListController) {
+      _currentListController.abort()
+    }
+
+    const controller = new AbortController()
+    const requestId = ++_currentRequestId
+
+    _currentListController = controller
+    _currentListKey = requestKey
+    isLoading.value = true
+
+    _currentListPromise = (async () => {
+      try {
+        const response = await fetch(`${apiBase}/ads?${urlParams}`, {
+          headers: getAuthHeaders(),
+          signal: controller.signal,
+        })
+        if (requestId !== _currentRequestId) return
+        if (!response.ok) {
+          ads.value = []
+          totalCount.value = 0
+          totalPages.value = 0
+          page.value = 1
+          throw new Error(await parseErrMsg(response, `Request failed (${response.status})`))
+        }
+        const data = await response.json()
+        if (requestId !== _currentRequestId) return
+        const { items, total } = extractList(data)
+        ads.value = items
+        totalCount.value = total
+        page.value = data.page ?? params.page ?? 1
+        pageSize.value = data.pageSize ?? params.pageSize ?? 20
+        totalPages.value = data.totalPages ?? (pageSize.value > 0 ? Math.ceil(totalCount.value / pageSize.value) : 0)
+      } catch (e) {
+        if (requestId !== _currentRequestId || e?.name === 'AbortError') return
+        throw e
+      } finally {
+        if (_currentListController === controller) {
+          _currentListController = null
+          _currentListPromise = null
+          _currentListKey = ''
+        }
+        if (requestId === _currentRequestId) isLoading.value = false
+      }
+    })()
+
+    return _currentListPromise
   }
 
   async function loadAd(id) {
-    const response = await fetch(`${apiBase}/ads/${id}`, {
-      headers: getAuthHeaders(),
+    return fetchDeduped(`ad:${id}`, async () => {
+      const response = await fetch(`${apiBase}/ads/${id}`, {
+        headers: getAuthHeaders(),
+      })
+
+      if (!response.ok) {
+        selectedAd.value = null
+        const errorText = await response.text().catch(() => '')
+        throw new Error(errorText || `Request failed (${response.status})`)
+      }
+
+      selectedAd.value = await response.json()
+      return selectedAd.value
     })
-
-    if (!response.ok) {
-      selectedAd.value = null
-      const errorText = await response.text().catch(() => '')
-      throw new Error(errorText || `Request failed (${response.status})`)
-    }
-
-    selectedAd.value = await response.json()
   }
 
   // regular JSON-only creation (no images)
@@ -87,8 +168,7 @@ export const useAdsStore = defineStore('ads', () => {
       body: formData,
     })
     if (!response.ok) {
-      const txt = await response.text()
-      throw new Error(txt || `Request failed (${response.status})`)
+      throw new Error(await parseErrMsg(response, `Request failed (${response.status})`))
     }
     return await response.json()
   }
@@ -147,8 +227,7 @@ export const useAdsStore = defineStore('ads', () => {
       body: formData,
     })
     if (!response.ok) {
-      const txt = await response.text()
-      throw new Error(txt || `Request failed (${response.status})`)
+      throw new Error(await parseErrMsg(response, `Request failed (${response.status})`))
     }
     const json = await response.json()
     selectedAd.value = json
@@ -247,6 +326,11 @@ export const useAdsStore = defineStore('ads', () => {
   return {
     ads,
     selectedAd,
+    totalCount,
+    page,
+    pageSize,
+    totalPages,
+    isLoading,
     loadAds,
     loadAd,
     createAd,

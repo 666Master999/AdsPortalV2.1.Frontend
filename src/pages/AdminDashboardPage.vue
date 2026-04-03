@@ -12,6 +12,15 @@ const complaints = ref([])
 const isLoading = ref(false)
 const error = ref('')
 
+const adsMeta = ref({ total: 0, skip: 0 })
+const usersMeta = ref({ total: 0, skip: 0 })
+const complaintsMeta = ref({ total: 0, skip: 0 })
+const TAKE = 50
+
+function hasMore(meta, list) {
+  return list.length < meta.total
+}
+
 const activeTab = computed(() => String(route.query.tab || 'ads'))
 
 const imagePlaceholder =
@@ -98,9 +107,9 @@ async function loadActiveTab() {
 
   try {
     const [adsRes, usersRes, complaintsRes] = await Promise.all([
-      fetch(`${apiBase}/ads`, { headers }),
-      fetch(`${apiBase}/users`, { headers }),
-      fetch(`${apiBase}/complaints`, { headers }),
+      fetch(`${apiBase}/ads?skip=0&take=${TAKE}`, { headers }),
+      fetch(`${apiBase}/users?skip=0&take=${TAKE}`, { headers }),
+      fetch(`${apiBase}/complaints?skip=0&take=${TAKE}`, { headers }),
     ])
 
     if (!adsRes.ok || !usersRes.ok || !complaintsRes.ok) {
@@ -111,11 +120,57 @@ async function loadActiveTab() {
     const usersData = await usersRes.json()
     const complaintsData = await complaintsRes.json()
 
-    ads.value = adsData.data || adsData || []
-    users.value = usersData.data || usersData || []
-    complaints.value = complaintsData.data || complaintsData || []
+    function extractPage(data) {
+      if (Array.isArray(data)) return { items: data, total: data.length }
+      if (Array.isArray(data?.items)) return { items: data.items, total: data.totalCount ?? data.total ?? data.items.length }
+      if (Array.isArray(data?.data)) return { items: data.data, total: data.totalCount ?? data.total ?? data.data.length }
+      return { items: [], total: 0 }
+    }
+
+    const ap = extractPage(adsData)
+    const up = extractPage(usersData)
+    const cp = extractPage(complaintsData)
+
+    ads.value = ap.items
+    users.value = up.items
+    complaints.value = cp.items
+    adsMeta.value = { total: ap.total, skip: ap.items.length }
+    usersMeta.value = { total: up.total, skip: up.items.length }
+    complaintsMeta.value = { total: cp.total, skip: cp.items.length }
   } catch (ex) {
     error.value = ex?.message || 'Не удалось загрузить данные'
+  } finally {
+    isLoading.value = false
+  }
+}
+
+async function loadMoreTab(tab) {
+  const token = localStorage.getItem('token')
+  const headers = token ? { Authorization: `Bearer ${token}` } : {}
+  const endpointMap = { ads: 'ads', users: 'users', complaints: 'complaints' }
+  const listMap = { ads, users, complaints }
+  const metaMap = { ads: adsMeta, users: usersMeta, complaints: complaintsMeta }
+  const endpoint = endpointMap[tab]
+  const list = listMap[tab]
+  const meta = metaMap[tab]
+  if (!endpoint || list.value.length >= meta.value.total) return
+
+  isLoading.value = true
+  try {
+    const res = await fetch(`${apiBase}/${endpoint}?skip=${meta.value.skip}&take=${TAKE}`, { headers })
+    if (!res.ok) throw new Error(`Ошибка загрузки (${res.status})`)
+    const data = await res.json()
+    function extractPage(d) {
+      if (Array.isArray(d)) return { items: d, total: d.length }
+      if (Array.isArray(d?.items)) return { items: d.items, total: d.totalCount ?? d.total ?? d.items.length }
+      if (Array.isArray(d?.data)) return { items: d.data, total: d.totalCount ?? d.total ?? d.data.length }
+      return { items: [], total: 0 }
+    }
+    const { items, total } = extractPage(data)
+    list.value = [...list.value, ...items]
+    meta.value = { total, skip: list.value.length }
+  } catch (ex) {
+    error.value = ex?.message || 'Не удалось загрузить'
   } finally {
     isLoading.value = false
   }
@@ -200,6 +255,12 @@ watch(
                 </div>
               </div>
             </div>
+            <div v-if="hasMore(adsMeta, ads)" class="card-footer bg-transparent text-center border-top-0 pt-0">
+              <button class="btn btn-outline-secondary rounded-pill px-4" :disabled="isLoading" @click="loadMoreTab('ads')">
+                <span v-if="isLoading" class="spinner-border spinner-border-sm me-2" role="status"></span>
+                Загрузить ещё ({{ ads.length }} / {{ adsMeta.total }})
+              </button>
+            </div>
           </section>
 
           <section v-if="activeTab === 'users'" class="card border-0 shadow-sm rounded-4 mb-4">
@@ -226,6 +287,12 @@ watch(
                 </table>
               </div>
             </div>
+            <div v-if="hasMore(usersMeta, users)" class="card-footer bg-transparent text-center border-top-0 pt-0">
+              <button class="btn btn-outline-secondary rounded-pill px-4" :disabled="isLoading" @click="loadMoreTab('users')">
+                <span v-if="isLoading" class="spinner-border spinner-border-sm me-2" role="status"></span>
+                Загрузить ещё ({{ users.length }} / {{ usersMeta.total }})
+              </button>
+            </div>
           </section>
 
           <section v-if="activeTab === 'complaints'" class="card border-0 shadow-sm rounded-4">
@@ -251,6 +318,12 @@ watch(
                   </tbody>
                 </table>
               </div>
+            </div>
+            <div v-if="hasMore(complaintsMeta, complaints)" class="card-footer bg-transparent text-center border-top-0 pt-0">
+              <button class="btn btn-outline-secondary rounded-pill px-4" :disabled="isLoading" @click="loadMoreTab('complaints')">
+                <span v-if="isLoading" class="spinner-border spinner-border-sm me-2" role="status"></span>
+                Загрузить ещё ({{ complaints.length }} / {{ complaintsMeta.total }})
+              </button>
             </div>
           </section>
         </div>

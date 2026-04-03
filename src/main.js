@@ -5,9 +5,107 @@ import App from './App.vue'
 import 'bootstrap/dist/css/bootstrap.min.css'
 import 'bootstrap/dist/js/bootstrap.bundle.min.js'
 
+function installFetchTracer() {
+	if (!import.meta.env.DEV) return
+	if (typeof window === 'undefined' || typeof window.fetch !== 'function') return
+	if (window.__FETCH_TRACER_INSTALLED__) return
+
+	window.__FETCH_TRACER_INSTALLED__ = true
+
+	const originalFetch = window.fetch.bind(window)
+	let reqId = 0
+	let total = 0
+	const active = new Map()
+	const stats = {}
+
+	function getUrl(input) {
+		if (typeof input === 'string') return input
+		if (input instanceof Request) return input.url
+		if (input && typeof input === 'object' && typeof input.url === 'string') return input.url
+		return String(input || '')
+	}
+
+	function normalizeUrl(url) {
+		try {
+			return new URL(url, window.location.href).pathname + new URL(url, window.location.href).search
+		} catch {
+			return String(url || '')
+		}
+	}
+
+	function formatBody(body) {
+		if (body == null) return ''
+		if (typeof body === 'string') return body
+		if (body instanceof URLSearchParams) return body.toString()
+		if (body instanceof FormData) return '[FormData]'
+		if (body instanceof Blob) return `[Blob:${body.type || 'unknown'}:${body.size || 0}]`
+		if (body instanceof ArrayBuffer) return `[ArrayBuffer:${body.byteLength}]`
+		if (ArrayBuffer.isView(body)) return `[TypedArray:${body.byteLength}]`
+		if (typeof body === 'object') {
+			try {
+				return JSON.stringify(body)
+			} catch {
+				return '[Object]'
+			}
+		}
+		return String(body)
+	}
+
+	window.fetch = async (...args) => {
+		const id = ++reqId
+		const [input, options] = args
+		const url = getUrl(input)
+		const method = options?.method || (input instanceof Request && input.method) || 'GET'
+		const start = performance.now()
+		const stack = new Error().stack
+		const normalized = normalizeUrl(url)
+
+		total += 1
+		stats[normalized] = (stats[normalized] || 0) + 1
+
+		console.log('TOTAL REQUESTS:', total)
+		console.log('STATS:', stats)
+		console.log(`%c[REQ ${id}] → ${url}`, 'color: orange', options || input)
+
+		active.set(id, {
+			url,
+			method,
+			start,
+			stack,
+			body: formatBody(options?.body),
+		})
+
+		try {
+			const res = await originalFetch(...args)
+
+			const meta = active.get(id)
+			if (meta) {
+				const time = (performance.now() - meta.start).toFixed(0)
+				console.log(`%c[RES ${id}] ✔ ${meta.url} (${time}ms)`, 'color: green')
+				active.delete(id)
+			}
+
+			return res
+		} catch (err) {
+			const meta = active.get(id)
+			if (meta) {
+				const time = (performance.now() - meta.start).toFixed(0)
+				console.log(`%c[ERR ${id}] ✖ ${meta.url} (${time}ms)`, 'color: red')
+				console.log('STACK TRACE:\n', meta.stack)
+				active.delete(id)
+			}
+
+			throw err
+		}
+	}
+
+	window.__FETCH_TRACER__ = { active, stats, get total() { return total } }
+}
+
 const app = createApp(App)
 app.use(createPinia())
 app.use(router)
+installFetchTracer()
 
 // Clean IntersectionObserver-based lazy loader for <img>
  
