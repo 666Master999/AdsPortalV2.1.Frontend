@@ -4,18 +4,24 @@ import { useRoute, useRouter } from 'vue-router'
 import { useAdsStore } from '../stores/adsStore'
 import { useUserStore } from '../stores/userStore'
 import { useChatStore } from '../stores/chatStore'
-import { getApiBaseUrl } from '../config/apiBase'
+import { usePresenceStore } from '../stores/presenceStore'
+import { useLocations } from '../composables/useLocations'
 import { timeAgo } from '../utils/formatDate'
+import { getModerationStatusClass, getModerationStatusLabel, normalizeModerationStatus } from '@/utils/moderationStatus'
+import { resolveMediaUrl } from '../utils/resolveMediaUrl'
+import { parsePatchIssues } from '../utils/patchResult'
+import { ContractError, mapContractErrorToUi } from '../utils/apiContract'
 
 const route = useRoute()
 const router = useRouter()
 const adsStore = useAdsStore()
 const userStore = useUserStore()
 const chatStore = useChatStore()
+const presenceStore = usePresenceStore()
 
-const apiBase = getApiBaseUrl()
 const currentImage = ref(null)
 const avatarError = ref(false)
+const { loadTree, getLocationPathLabel } = useLocations()
 
 const serverInfo = ref(null)
 
@@ -25,71 +31,27 @@ const loadError = ref(null)
 
 const ad = computed(() => adsStore.selectedAd)
 
-function resolveModerationStatus(raw) {
-  if (raw === undefined || raw === null || raw === '') return ''
-  const normalized = String(raw).trim()
-  if (!normalized) return ''
-
-  switch (normalized.toLowerCase()) {
-    case '0':
-    case 'pending':
-      return 'Pending'
-    case '1':
-    case 'approved':
-      return 'Approved'
-    case '2':
-    case 'rejected':
-      return 'Rejected'
-    case '3':
-    case 'hidden':
-      return 'Hidden'
-    default:
-      return normalized
-  }
-}
-
 const moderationStatus = computed(() => {
-  return resolveModerationStatus(ad.value?.moderationStatus ?? ad.value?.status)
+  return normalizeModerationStatus(ad.value?.moderationStatus ?? ad.value?.status)
 })
 
 const moderationStatusLabel = computed(() => {
-  switch (moderationStatus.value) {
-    case 'Pending':
-      return 'На модерации'
-    case 'Approved':
-      return 'Одобрено'
-    case 'Rejected':
-      return 'Отклонено'
-    case 'Hidden':
-      return 'Скрыто'
-    default:
-      return moderationStatus.value
-  }
+  return getModerationStatusLabel(moderationStatus.value)
 })
 
 const moderationStatusClass = computed(() => {
-  switch (moderationStatus.value) {
-    case 'Pending':
-      return 'bg-warning text-dark'
-    case 'Approved':
-      return 'bg-success'
-    case 'Rejected':
-      return 'bg-danger'
-    case 'Hidden':
-      return 'bg-secondary'
-    default:
-      return 'bg-secondary'
-  }
+  return getModerationStatusClass(moderationStatus.value)
 })
 
 // show server response (e.g. after editing an ad)
 watchEffect(() => {
-  const { message, updated, skipped } = route.query
-  if (message || updated || skipped) {
+  const { message, updated, skipped, errors } = route.query
+  if (message || updated || skipped || errors) {
     serverInfo.value = {
       message: message ? String(message) : null,
       updated: updated ? String(updated).split(',').filter(Boolean) : [],
-      skipped: skipped ? String(skipped).split(',').filter(Boolean) : [],
+      skipped: parsePatchIssues(skipped),
+      errors: parsePatchIssues(errors, 'validation_error'),
     }
 
     // remove query so alerts don't reappear on page reload
@@ -102,15 +64,26 @@ const sellerInitial = computed(() => {
   return login ? login.charAt(0).toUpperCase() : ''
 })
 
-const displayImage = computed(() => {
-  const imagePath =
-    currentImage.value ||
-    ad.value?.images?.find(img => img.isMain)?.filePath ||
-    ad.value?.images?.[0]?.filePath ||
-    ad.value?.mainImageUrl ||
-    ad.value?.mainImage
+const sellerId = computed(() => (ad.value?.user?.id != null ? String(ad.value.user.id) : ''))
 
-  return imagePath ? `${apiBase}/${imagePath}` : ''
+const sellerIsOnline = computed(() => presenceStore.isOnline(sellerId.value))
+
+const sellerLastSeenText = computed(() => {
+  if (!presenceStore.isPresenceReady) return '...'
+  if (sellerIsOnline.value) return 'в сети'
+  const last = presenceStore.getLastActivity(sellerId.value) ?? ad.value?.user?.lastActivityAt
+  if (!last) return 'был(а) давно'
+  return timeAgo(last, { prefix: 'Был(а) в сети ' })
+})
+
+const sellerLastSeenClass = computed(() => {
+  if (!presenceStore.isPresenceReady) return 'text-secondary'
+  if (sellerIsOnline.value) return 'text-success'
+  return 'text-secondary'
+})
+
+const displayImage = computed(() => {
+  return resolveMediaUrl(currentImage.value)
 })
 
 const isFavorite = ref(false)
@@ -125,7 +98,7 @@ watch(
   { immediate: true }
 )
 
-const isAdmin = computed(() => Boolean(userStore.isAdmin))
+const canModerate = computed(() => Boolean(userStore.canModerateAds))
 
 const priceText = computed(() => {
   if (!ad.value) return ''
@@ -135,39 +108,52 @@ const priceText = computed(() => {
   return `${p} Br`
 })
 
-const cityText = computed(() => {
+const locationText = computed(() => {
   if (!ad.value) return ''
-  const district = ad.value.district
-  const city = ad.value.city
-  if (district?.name && city?.name) return `${district.name}, ${city.name}`
-  if (district?.name) return district.name
-  if (city?.name) return city.name
-  return ''
+  return getLocationPathLabel(ad.value.locationId) || 'Локация не указана'
 })
 
 const canEdit = computed(() => {
   if (!ad.value) return false
   const currentUserId = userStore.user?.userId || userStore.tokenUserId
   const isOwner = currentUserId && ad.value?.user?.id && String(currentUserId) === String(ad.value.user.id)
-  return isOwner || isAdmin.value
+  return isOwner || canModerate.value
 })
 
 async function setModerationStatus(newStatus) {
   if (!ad.value?.id) return
 
-  const confirmMsg = `Установить статус "${newStatus}" для объявления "${ad.value.title}"?`
-  if (!confirm(confirmMsg)) return
-
-  try {
-    await adsStore.patchModerationStatus(ad.value.id, newStatus)
-    alert(`Статус объявления обновлён: ${newStatus}`)
-  } catch (err) {
-    alert(err?.message || 'Не удалось обновить статус объявления')
+  // open app-styled confirmation modal instead of browser confirm()
+  confirmTitle.value = 'Подтвердить действие'
+  confirmMessage.value = `Установить статус "${newStatus}" для объявления "${ad.value.title}"?`
+  confirmPrimaryLabel.value = 'Да'
+  // pick primary button style based on status
+  confirmPrimaryClass.value = newStatus === 'active' ? 'btn-success' : newStatus === 'deleted' ? 'btn-secondary' : newStatus === 'pendingModeration' ? 'btn-warning' : 'btn-primary'
+  confirmHandler = async () => {
+    confirmSending.value = true
+    try {
+      await adsStore.patchModerationStatus(ad.value.id, newStatus)
+      showConfirmModal.value = false
+      alert(`Статус объявления обновлён: ${newStatus}`)
+    } catch (err) {
+      alert(err?.message || 'Не удалось обновить статус объявления')
+    } finally {
+      confirmSending.value = false
+    }
   }
+  showConfirmModal.value = true
 }
 
 function getImageUrl(path) {
-  return `${apiBase}/${path}`
+  return resolveMediaUrl(path)
+}
+
+function handleImageError(imagePath) {
+  console.error('[AdDetailsPage] Failed to load image', imagePath)
+
+  if (currentImage.value === imagePath) {
+    currentImage.value = null
+  }
 }
 
 async function refreshFavoriteState(adId) {
@@ -177,29 +163,29 @@ async function refreshFavoriteState(adId) {
     return
   }
 
-  const userId = userStore.user?.userId || userStore.tokenUserId
-  const id = adId ?? ad.value?.id
-  if (!userId || !id) {
-    isFavorite.value = false
-    return
-  }
-
-  try {
-    isFavorite.value = await userStore.checkIsFavorite(id)
-  } catch (err) {
-    console.error('Failed to check favorite:', err)
-    isFavorite.value = Boolean(ad.value?.isFavorite)
-  }
+  isFavorite.value = Boolean(ad.value?.isFavorite)
 }
 
 onMounted(async () => {
+  void loadTree()
   isLoading.value = true
   loadError.value = null
 
   try {
     await adsStore.loadAd(route.params.id)
+    if (ad.value?.images?.length) {
+      const mainImage = ad.value.images.find(image => image.id === ad.value.mainImageId)
+      currentImage.value = mainImage.filePath
+    } else {
+      currentImage.value = ''
+    }
     await refreshFavoriteState(route.params.id)
   } catch (e) {
+    if (e instanceof ContractError) {
+      loadError.value = mapContractErrorToUi(e)
+      return
+    }
+
     // Если объявление недоступно (удалено/нет доступа/не найдено) — показываем сообщение.
     let serverMsg = ''
 
@@ -227,22 +213,7 @@ onMounted(async () => {
   } finally {
     isLoading.value = false
   }
-
-  if (ad.value?.images?.length) {
-    const main = ad.value.images.find(img => img.isMain) || ad.value.images[0]
-    currentImage.value = main.filePath
-  }
 })
-
-watch(
-  () => ad.value?.images,
-  images => {
-    if (!currentImage.value && images?.length) {
-      currentImage.value = images.find(img => img.isMain)?.filePath || images[0].filePath
-    }
-  },
-  { immediate: true }
-)
 
 async function toggleFavorite() {
   const userId = userStore.user?.userId || userStore.tokenUserId
@@ -271,6 +242,16 @@ const showMessageModal = ref(false)
 const initialMessage = ref('')
 const modalSending = ref(false)
 const modalError = ref(null)
+const showRejectModal = ref(false)
+const rejectReason = ref('')
+const rejectSending = ref(false)
+const showConfirmModal = ref(false)
+const confirmTitle = ref('')
+const confirmMessage = ref('')
+const confirmSending = ref(false)
+const confirmPrimaryLabel = ref('Подтвердить')
+const confirmPrimaryClass = ref('btn-primary')
+let confirmHandler = null
 
 async function writeToSeller() {
   try {
@@ -302,20 +283,54 @@ async function submitInitialMessage() {
   }
 }
 
-async function deleteAd() {
-  const shouldDelete = confirm('Вы действительно хотите удалить это объявление? Это действие необратимо.')
-  if (!shouldDelete) return
+function openRejectModal() {
+  rejectReason.value = ''
+  showRejectModal.value = true
+}
 
+async function confirmReject() {
+  if (!ad.value?.id) return
+  rejectSending.value = true
   try {
-    await adsStore.deleteAd(route.params.id)
-    alert('Объявление удалено')
-    router.push('/')
+    await adsStore.patchModerationStatus(ad.value.id, 'rejected', rejectReason.value)
+    showRejectModal.value = false
+    rejectReason.value = ''
+    alert('Статус объявления обновлён: rejected')
   } catch (err) {
-    alert(err?.message)
+    alert(err?.message || 'Не удалось обновить статус объявления')
+  } finally {
+    rejectSending.value = false
+  }
+}
 
-    if (err?.status === 404) {
+async function deleteAd() {
+  // open app-styled confirmation modal for delete
+  confirmTitle.value = 'Удалить объявление'
+  confirmMessage.value = 'Вы действительно хотите удалить это объявление? Это действие необратимо.'
+  confirmPrimaryLabel.value = 'Удалить'
+  confirmPrimaryClass.value = 'btn-danger'
+  confirmHandler = async () => {
+    confirmSending.value = true
+    try {
+      await adsStore.deleteAd(route.params.id)
+      showConfirmModal.value = false
+      alert('Объявление удалено')
       router.push('/')
+    } catch (err) {
+      alert(err?.message)
+      if (err?.status === 404) {
+        router.push('/')
+      }
+    } finally {
+      confirmSending.value = false
     }
+  }
+  showConfirmModal.value = true
+}
+
+async function confirmExecute() {
+  if (typeof confirmHandler === 'function') {
+    await confirmHandler()
   }
 }
 
@@ -368,8 +383,21 @@ function setCurrentImage(filePath) {
 
           <div v-if="serverInfo?.skipped?.length" class="alert alert-warning mb-3">
             <strong>Пропущено:</strong>
-            <div class="mt-2">
-              <span v-for="field in serverInfo.skipped" :key="field" class="badge bg-secondary me-1 mb-1">{{ field }}</span>
+            <div class="mt-2 d-grid gap-1">
+              <div v-for="issue in serverInfo.skipped" :key="`${issue.code ?? 'skipped'}-${issue.field ?? ''}-${issue.message ?? ''}`" class="small">
+                <span class="badge bg-secondary me-2">{{ issue.field || issue.code || 'skipped' }}</span>
+                <span>{{ issue.field && issue.message ? `${issue.field}: ${issue.message}` : (issue.message || issue.field || issue.code) }}</span>
+              </div>
+            </div>
+          </div>
+
+          <div v-if="serverInfo?.errors?.length" class="alert alert-danger mb-3">
+            <strong>Ошибки:</strong>
+            <div class="mt-2 d-grid gap-1">
+              <div v-for="issue in serverInfo.errors" :key="`${issue.code ?? 'error'}-${issue.field ?? ''}-${issue.message ?? ''}`" class="small">
+                <span class="badge bg-danger me-2">{{ issue.field || issue.code || 'error' }}</span>
+                <span>{{ issue.field && issue.message ? `${issue.field}: ${issue.message}` : (issue.message || issue.field || issue.code) }}</span>
+              </div>
             </div>
           </div>
 
@@ -386,7 +414,7 @@ function setCurrentImage(filePath) {
               <div class="card border-0 shadow-sm rounded-4 overflow-hidden mb-4">
                 <div class="ratio ratio-16x9 bg-light overflow-hidden">
                   <template v-if="displayImage">
-                    <img :src="displayImage" class="w-100 h-100 object-fit-cover" :alt="ad.title" @error="currentImage = null" />
+                    <img :src="displayImage" class="w-100 h-100 object-fit-cover" :alt="ad.title" @error="handleImageError(currentImage)" />
                   </template>
                   <div v-else class="w-100 h-100 d-flex flex-column align-items-center justify-content-center text-secondary">
                     <span style="font-size: 2.2rem;">📷</span>
@@ -394,17 +422,18 @@ function setCurrentImage(filePath) {
                   </div>
                 </div>
                 <div class="card-body py-3">
-                  <div v-if="ad.images?.length" class="d-flex flex-wrap gap-2">
+                  <div v-if="ad.images.length" class="d-flex flex-wrap gap-2">
                     <button
                       v-for="img in ad.images"
                       :key="img.id"
                       type="button"
-                      class="p-0 border-0 rounded overflow-hidden"
+                      class="p-0 border-0 rounded overflow-hidden position-relative"
                       :class="{ 'border border-primary': currentImage === img.filePath }"
                       style="cursor: pointer;"
                       @click="setCurrentImage(img.filePath)"
                     >
-                      <img :src="getImageUrl(img.filePath)" class="img-thumbnail border-0" style="width: 80px; height: 80px; object-fit: cover;" :alt="`Изображение ${img.id}`" />
+                      <span v-if="img.isMain" class="badge bg-primary position-absolute top-0 start-0 m-1 pe-none">Главное</span>
+                      <img :src="getImageUrl(img.filePath)" class="img-thumbnail border-0" style="width: 80px; height: 80px; object-fit: cover;" :alt="`Изображение ${img.id}`" @error="handleImageError(img.filePath)" />
                     </button>
                   </div>
                 </div>
@@ -427,8 +456,8 @@ function setCurrentImage(filePath) {
                       <div>
                         <h2 class="h4 mb-1 fw-semibold">{{ ad.title }}</h2>
                         <p class="text-muted mb-1">
-                          <span class="badge bg-secondary me-1">{{ ad.type }}</span>
-                          <span>{{ cityText }}</span>
+                          <span class="badge bg-secondary me-1">{{ ad.listingType }}</span>
+                          <span>{{ locationText }}</span>
                         </p>
                       </div>
                       <div class="text-end">
@@ -456,29 +485,32 @@ function setCurrentImage(filePath) {
                 <div class="card border-0 shadow-sm rounded-4">
                   <div class="card-body">
                     <h2 class="h6 mb-3 fw-semibold">Продавец</h2>
-                    <router-link :to="`/profile/${ad.user?.id}`" class="d-flex align-items-center text-decoration-none text-body">
-                      <div class="me-3">
-                        <img v-if="ad.user?.avatarPath && !avatarError" :src="getImageUrl(ad.user.avatarPath)" class="rounded-circle" style="width:50px;height:50px;object-fit:cover;" alt="Аватар продавца" @error="avatarError = true" />
-                        <div v-else class="bg-secondary text-white d-flex align-items-center justify-content-center" style="width:50px;height:50px;border-radius:50%;font-weight:bold;">{{ sellerInitial }}</div>
+                    <router-link :to="`/users/${ad.user?.id}`" class="d-flex align-items-center text-decoration-none text-body">
+                      <div class="me-3" style="position:relative;">
+                        <div style="width:50px;height:50px;position:relative;">
+                          <img v-if="ad.user?.avatarPath && !avatarError" :src="getImageUrl(ad.user.avatarPath)" class="rounded-circle" style="width:50px;height:50px;object-fit:cover;" alt="Аватар продавца" @error="avatarError = true" />
+                          <div v-else class="bg-secondary text-white d-flex align-items-center justify-content-center" style="width:50px;height:50px;border-radius:50%;font-weight:bold;">{{ sellerInitial }}</div>
+                          <span v-if="sellerIsOnline" class="d-inline-block" style="position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px; border-radius: 50%; background: #198754; border: 2px solid #fff;"></span>
+                        </div>
                       </div>
                       <div>
                         <div class="fw-semibold">{{ ad.user?.userLogin }}</div>
                         <div class="text-muted small">{{ ad.user?.userEmail }}</div>
                         <div class="text-muted small">{{ ad.user?.userPhoneNumber }}</div>
-                        <div class="text-muted small">{{ ad.user?.lastActivityAt ? timeAgo(ad.user.lastActivityAt, { prefix: 'Был(а) в сети ' }) : 'Был(а) в сети неизвестно' }}</div>
+                        <div :class="['small', sellerLastSeenClass]">{{ sellerLastSeenText }}</div>
                       </div>
                     </router-link>
                   </div>
                 </div>
 
-                <div v-if="isAdmin" class="card border-0 shadow-sm rounded-4">
+                <div v-if="canModerate" class="card border-0 shadow-sm rounded-4">
                   <div class="card-body">
-                    <h2 class="h6 mb-3 fw-semibold">Блок модерации (админ)</h2>
+                    <h2 class="h6 mb-3 fw-semibold">Блок модерации</h2>
                     <div class="d-grid gap-2">
-                      <button class="btn btn-outline-success" @click="setModerationStatus('Approved')">Одобрить</button>
-                      <button class="btn btn-outline-danger" @click="setModerationStatus('Rejected')">Отклонить</button>
-                      <button class="btn btn-outline-secondary" @click="setModerationStatus('Hidden')">Скрыть</button>
-                      <button class="btn btn-outline-warning" @click="setModerationStatus('Pending')">Отправить на модерацию</button>
+                      <button class="btn btn-outline-success" @click="setModerationStatus('active')">Одобрить</button>
+                      <button class="btn btn-outline-danger" @click="openRejectModal">Отклонить</button>
+                      <button class="btn btn-outline-secondary" @click="setModerationStatus('deleted')">Скрыть</button>
+                      <button class="btn btn-outline-warning" @click="setModerationStatus('pendingModeration')">Отправить на модерацию</button>
                     </div>
                   </div>
                 </div>
@@ -523,6 +555,52 @@ function setCurrentImage(filePath) {
             <button type="button" class="btn btn-primary" @click="submitInitialMessage" :disabled="modalSending || !initialMessage.trim()">
               <span v-if="modalSending" class="spinner-border spinner-border-sm me-1" role="status"></span>
               Отправить
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </teleport>
+
+  <teleport to="body">
+    <div v-if="showRejectModal" class="modal d-block" tabindex="-1" style="background:rgba(0,0,0,.45);" @click.self="showRejectModal = false">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">Причина отказа</h5>
+            <button type="button" class="btn-close" @click="showRejectModal = false"></button>
+          </div>
+          <div class="modal-body">
+            <p class="text-muted small mb-2">Объявление: <strong>{{ ad?.title }}</strong></p>
+            <textarea v-model="rejectReason" class="form-control" rows="3" placeholder="Укажите причину отказа"></textarea>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" @click="showRejectModal = false" :disabled="rejectSending">Отмена</button>
+            <button type="button" class="btn btn-danger" @click="confirmReject" :disabled="rejectSending">
+              <span v-if="rejectSending" class="spinner-border spinner-border-sm me-1" role="status"></span>
+              Отклонить
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  </teleport>
+  <teleport to="body">
+    <div v-if="showConfirmModal" class="modal d-block" tabindex="-1" style="background:rgba(0,0,0,.45);" @click.self="showConfirmModal = false">
+      <div class="modal-dialog modal-dialog-centered">
+        <div class="modal-content">
+          <div class="modal-header">
+            <h5 class="modal-title">{{ confirmTitle }}</h5>
+            <button type="button" class="btn-close" @click="showConfirmModal = false"></button>
+          </div>
+          <div class="modal-body">
+            <p class="text-muted small mb-2">{{ confirmMessage }}</p>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" @click="showConfirmModal = false" :disabled="confirmSending">Отмена</button>
+            <button type="button" :class="['btn', confirmPrimaryClass]" @click="confirmExecute" :disabled="confirmSending">
+              <span v-if="confirmSending" class="spinner-border spinner-border-sm me-1" role="status"></span>
+              {{ confirmPrimaryLabel }}
             </button>
           </div>
         </div>

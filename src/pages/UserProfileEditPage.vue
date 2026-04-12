@@ -2,7 +2,9 @@
 import { ref, computed, watchEffect } from 'vue'
 import { useUserStore } from '../stores/userStore'
 import { useRoute, useRouter } from 'vue-router'
-import { getApiBaseUrl } from '../config/apiBase'
+import { handleApiError, toPublicErrorMessage } from '../services/errorService'
+import { resolveMediaUrl } from '../utils/resolveMediaUrl'
+import { serializePatchIssues } from '../utils/patchResult'
 
 const userStore = useUserStore()
 const route = useRoute()
@@ -27,8 +29,7 @@ const avatarPreview = computed(() => {
   const v = editData.value.avatarPath
   if (!v) return ''
   if (/^data:/.test(v) || /^blob:/.test(v) || /^https?:\/\//.test(v)) return v
-  const apiBase = getApiBaseUrl()
-  return apiBase + (v.startsWith('/') ? v : '/' + v)
+  return resolveMediaUrl(v)
 })
 
 const profileId = computed(() => parseInt(route.params.id) || userStore.user?.userId)
@@ -37,20 +38,21 @@ const isOwnProfile = computed(() => profileId.value === userStore.user?.userId)
 // redirect bare /profile to include id
 watchEffect(() => {
   if (!route.params.id && profileId.value) {
-    router.replace(`/profile/${profileId.value}`)
+    router.replace(`/users/${profileId.value}`)
   }
 })
 
 // if the user tries to edit someone else's profile, send them back
 watchEffect(() => {
   if (profileId.value && !isOwnProfile.value) {
-    router.replace(`/profile/${profileId.value}`)
+    router.replace(`/users/${profileId.value}`)
   }
 })
 
 // load profile when id changes
 watchEffect(async () => {
   if (!profileId.value) return
+
   error.value = ''
   try {
     profile.value = await userStore.fetchProfile(profileId.value)
@@ -64,9 +66,10 @@ watchEffect(async () => {
       editData.value.passwordConfirm = ''
       avatarFile.value = null
     }
-  } catch (e) {
+  } catch (errorValue) {
     profile.value = null
-    error.value = e?.message || 'Ошибка при загрузке профиля'
+    const apiError = await handleApiError(errorValue, { notify: false })
+    error.value = toPublicErrorMessage(apiError, 'Ошибка при загрузке профиля')
   }
 })
 
@@ -119,9 +122,7 @@ async function saveProfile() {
       const uploadJson = await userStore.uploadAvatar(profileId.value, avatarFile.value)
       const serverPath =
         uploadJson?.user?.avatarPath ||
-        uploadJson?.avatarPath ||
-        uploadJson?.userAvatarPath ||
-        uploadJson?.user?.AvatarPath
+        uploadJson?.avatarPath
 
       if (!serverPath) throw new Error('Сервер не вернул путь к аватару')
 
@@ -137,20 +138,22 @@ async function saveProfile() {
 
     // redirect with updated/skipped info. prefer server arrays if present
     router.push({
-      path: `/profile/${profileId.value}`,
+      path: `/users/${profileId.value}`,
       query: {
         updated: (result.updated?.join(',') || updated.join(',')) || '',
-        skipped: (result.skipped?.join(',') || skipped.join(',')) || ''
+        skipped: serializePatchIssues(result.skipped?.length ? result.skipped : skipped),
+        errors: serializePatchIssues(result.errors),
       }
     })
-  } catch (e) {
+  } catch (errorValue) {
     // keep avatarFile so user can retry, but show error
-    error.value = e?.message || String(e)
+    const apiError = await handleApiError(errorValue, { notify: false })
+    error.value = toPublicErrorMessage(apiError, 'Не удалось сохранить профиль')
   }
 }
 
 function cancel() {
-  router.push(`/profile/${profileId.value}`)
+  router.push(`/users/${profileId.value}`)
 }
 </script>
 

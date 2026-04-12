@@ -4,7 +4,6 @@ import { useChatStore } from '../stores/chatStore'
 const VISIBILITY_DELAY = 300     // ms message must stay in view before counting
 const VISIBILITY_THRESHOLD = 0.6 // 60% of message must be visible
 
-const NEAR_BOTTOM_THRESHOLD = 100 // px from bottom = "reading zone"
 const READ_DEBOUNCE_MS = 150
 
 export function useReadTracker(messagesContainer, shouldTrackMessage = () => true) {
@@ -19,12 +18,6 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
   let observer = null
   let debounceTimer = null
   const observedIds = new Set()
-
-  function isNearBottom() {
-    const el = messagesContainer.value
-    if (!el) return false
-    return el.scrollHeight - el.scrollTop - el.clientHeight < NEAR_BOTTOM_THRESHOLD
-  }
 
   function isActiveConversation() {
     return Boolean(chatStore.currentConversation?.id)
@@ -45,7 +38,6 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
     if (!nextId) return false
     if (typeof document !== 'undefined' && document.hidden) return false
     if (!isActiveConversation()) return false
-    if (!isNearBottom()) return false
 
     const prevSent = Number(lastSentId ?? 0)
     if (prevSent && nextId <= prevSent) return false
@@ -65,16 +57,13 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
     import('../stores/presenceStore').then(({ usePresenceStore }) => {
       try { usePresenceStore().sendRead(convId, msgId) } catch {}
     }).catch(() => {})
-
-    // Optimistic local update (only forward)
+    if (typeof chatStore.markReadRemote === 'function') {
+      void chatStore.markReadRemote(convId, msgId).catch(() => {})
+    }
+    // Update local UI state via chatStore API so components react
     try {
-      const cid = String(convId)
-      const prev = Number(chatStore.myLastSeenByConversation.get(cid) ?? 0)
-      if (msgId > prev) {
-        chatStore.myLastSeenByConversation.set(cid, msgId)
-        chatStore.unreadByConversation.set(cid, 0)
-        const conv = chatStore.getConversationById(cid)
-        if (conv) { conv.unreadCount = 0; conv.hasUnread = false }
+      if (typeof chatStore.markReadLocal === 'function') {
+        chatStore.markReadLocal(convId, msgId)
       }
     } catch {}
   }

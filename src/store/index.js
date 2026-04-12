@@ -1,0 +1,8 @@
+export { useUserStore } from '../stores/userStore'
+export { useAdsStore } from '../stores/adsStore'
+export { useChatStore } from '../stores/chatStore'
+export { useCategoriesStore } from '../stores/categoriesStore'
+export { useLocationsStore } from '../stores/locationsStore'
+export { useNotificationsStore } from '../stores/notificationsStore'
+export { usePresenceStore } from '../stores/presenceStore'
+export { useTypingStore } from '../stores/typingStore'

@@ -4,25 +4,21 @@ import { useRouter } from 'vue-router'
 import { useUserStore } from '../stores/userStore'
 import { useChatStore } from '../stores/chatStore'
 import { useNotificationsStore } from '../stores/notificationsStore'
+import { useAccessService } from '../services/accessService'
+import NotificationItem from './notifications/NotificationItem.vue'
 
 const userStore = useUserStore()
 const chatStore = useChatStore()
 const notificationsStore = useNotificationsStore()
 const router = useRouter()
+const access = useAccessService()
 
-const openGroup = ref(null)
 const notificationsToggle = ref(null)
 const chatUnreadCount = computed(() => chatStore.unreadCount)
 const notificationsCount = computed(() => notificationsStore.unreadCount)
-
-function toggleGroup(adId) {
-  const key = String(adId ?? 'other')
-  openGroup.value = openGroup.value === key ? null : key
-}
-
-function resetOpenGroup() {
-  openGroup.value = null
-}
+const canCreateAd = computed(() => access.canCreateAd())
+const canAccessAdmin = computed(() => access.canAccessAdmin())
+const canOpenDashboard = computed(() => access.canAccessAdmin() || access.canModerate())
 
 function closeDropdown() {
   const toggleEl = notificationsToggle.value
@@ -30,39 +26,88 @@ function closeDropdown() {
   dropdownApi?.hide()
 }
 
-function markNotificationAsRead(id) {
-  notificationsStore.markRead([id])
+function getNotificationAdId(notification) {
+  const adId = Number(notification?.adId ?? notification?.data?.adId)
+  return Number.isFinite(adId) && adId > 0 ? adId : null
 }
 
-function openNotification(notification) {
-  notificationsStore.markRead([notification.id])
+function openNotification(entry) {
+  const ids = Array.isArray(entry?.notificationIds) ? entry.notificationIds : []
+  notificationsStore.markRead(ids)
   closeDropdown()
 
-  if (notification.adId) {
-    router.push(`/ads/${notification.adId}`)
+  const adId = entry?.adId ?? null
+  if (adId == null) return
+
+  router.push(`/ads/${adId}`)
+}
+
+function editNotification(entry) {
+  const ids = Array.isArray(entry?.notificationIds) ? entry.notificationIds : []
+  notificationsStore.markRead(ids)
+  closeDropdown()
+
+  const adId = entry?.adId ?? null
+  if (adId == null) return
+
+  router.push(`/ads/${adId}/edit`)
+}
+
+const notificationEntries = computed(() => {
+  const items = Array.isArray(notificationsStore.notifications) ? notificationsStore.notifications : []
+  const groups = new Map()
+
+  for (const notification of items) {
+    const adId = getNotificationAdId(notification)
+    const key = adId != null ? `ad:${adId}` : `id:${notification.id}`
+    if (!groups.has(key)) groups.set(key, [])
+    groups.get(key).push(notification)
   }
-}
 
-function groupKey(adId) {
-  return String(adId ?? 'other')
-}
+  const entries = []
 
-function getNotificationLabel(notification) {
-  if (notification.type === 'newMessage') return 'Новое сообщение'
-  return `Объявление #${notification.adId}`
-}
+  for (const [key, list] of groups) {
+    const first = list[0]
+    const adId = getNotificationAdId(first)
 
-function handleLogout() {
-  userStore.logout()
+    if (adId != null && list.length > 1) {
+      entries.push({
+        key,
+        type: 'NotificationGroup',
+        adId,
+        notificationIds: list.map(item => item.id),
+        isRead: list.every(item => item.isRead),
+        createdAt: first.createdAt,
+        preview: first.preview,
+        data: { count: list.length },
+      })
+      continue
+    }
+
+    entries.push({
+      key: `id:${first.id}`,
+      type: first.type,
+      adId,
+      notificationIds: [first.id],
+      isRead: first.isRead,
+      createdAt: first.createdAt,
+      preview: first.preview,
+      data: first.data,
+    })
+  }
+
+  return entries
+})
+
+async function handleLogout() {
+  try {
+    await userStore.logout()
+  } catch {
+    // logout still clears auth locally in store
+  }
   router.push('/login')
 }
 
-const typeLabels = {
-  0: 'Одобрено',
-  1: 'Отклонено',
-  AdApproved: 'Одобрено',
-  AdRejected: 'Отклонено',
-}
 </script>
 
 <template>
@@ -90,7 +135,7 @@ const typeLabels = {
 
       <div class="collapse navbar-collapse" id="navbarNav">
         <ul class="navbar-nav mx-lg-auto gap-lg-2 align-items-lg-center">
-          <li class="nav-item" v-if="userStore.token">
+          <li class="nav-item" v-if="userStore.token && canCreateAd">
             <router-link class="nav-link px-3 rounded-pill" to="/ads/create">Создать</router-link>
           </li>
           <li class="nav-item" v-if="userStore.token">
@@ -108,21 +153,21 @@ const typeLabels = {
               </span>
             </router-link>
           </li>
-          <li class="nav-item dropdown" v-if="userStore.isAdmin">
+          <li class="nav-item dropdown" v-if="canOpenDashboard">
             <a class="nav-link px-3 rounded-pill dropdown-toggle" href="#" role="button" data-bs-toggle="dropdown" aria-expanded="false">
-              Админ
+              Панель
             </a>
             <ul class="dropdown-menu border-0 shadow rounded-4 p-2 mt-2">
               <li><router-link class="dropdown-item rounded-3 py-2" to="/admin?tab=ads">Объявления</router-link></li>
-              <li><router-link class="dropdown-item rounded-3 py-2" to="/admin?tab=users">Пользователи</router-link></li>
-              <li><router-link class="dropdown-item rounded-3 py-2" to="/admin?tab=complaints">Жалобы</router-link></li>
+              <li v-if="canAccessAdmin"><router-link class="dropdown-item rounded-3 py-2" to="/admin?tab=users">Пользователи</router-link></li>
+              <li v-if="canAccessAdmin"><router-link class="dropdown-item rounded-3 py-2" to="/admin?tab=logs">Логи</router-link></li>
             </ul>
           </li>
         </ul>
 
         <div class="d-flex align-items-center gap-2 ms-lg-auto mt-3 mt-lg-0">
           <template v-if="userStore.token">
-            <div class="dropdown" data-bs-auto-close="outside" @hidden.bs.dropdown="resetOpenGroup">
+            <div class="dropdown" data-bs-auto-close="outside">
               <button
                 ref="notificationsToggle"
                 class="btn btn-light rounded-circle shadow-sm position-relative d-inline-flex align-items-center justify-content-center"
@@ -162,66 +207,19 @@ const typeLabels = {
                   Нет уведомлений
                 </div>
 
-                <div v-else class="accordion accordion-flush" style="max-height:26rem; overflow-y:auto;">
-                  <div
-                    v-for="group in notificationsStore.groupedNotifications"
-                    :key="groupKey(group.adId)"
-                    class="accordion-item border-0 border-bottom"
-                  >
-                    <h2 class="accordion-header">
-                      <button
-                        class="accordion-button px-3 py-3 d-flex align-items-center justify-content-between shadow-none bg-transparent"
-                        :class="openGroup === groupKey(group.adId) ? '' : 'collapsed bg-transparent'"
-                        type="button"
-                        @click.stop="toggleGroup(group.adId)"
-                      >
-                        <span class="me-3 text-start">
-                          <span class="d-block fw-semibold text-body">Объявление #{{ group.adId ?? '—' }}</span>
-                        </span>
-                        <span class="d-flex align-items-center gap-2">
-                          <span v-if="group.unreadCount" class="badge rounded-pill bg-danger">{{ group.unreadCount }}</span>
-                        </span>
-                      </button>
-                    </h2>
-
-                    <div v-show="openGroup === groupKey(group.adId)" class="accordion-collapse">
-                      <div class="accordion-body p-2 bg-transparent">
-                        <div class="list-group list-group-flush">
-                          <div
-                            v-for="n in group.items"
-                            :key="n.id"
-                            class="list-group-item border rounded-4 mb-2 px-3 py-3 d-flex align-items-start justify-content-between gap-3"
-                            :class="n.isRead ? 'bg-white border-secondary-subtle' : 'bg-primary-subtle border-primary-subtle fw-semibold'"
-                            role="button"
-                            @click="openNotification(n)"
-                          >
-                            <div class="min-w-0 text-start flex-grow-1">
-                              <div class="d-flex align-items-center gap-2 flex-wrap">
-                                <span class="badge" :class="(n.type === 0 || n.type === 'AdApproved') ? 'bg-success' : 'bg-danger'">
-                                  {{ typeLabels[n.type] || n.type }}
-                                </span>
-                                <span class="text-body small text-truncate">{{ getNotificationLabel(n) }}</span>
-                              </div>
-                            </div>
-
-                            <div class="d-flex align-items-center gap-2" @click.stop>
-                              <button class="btn btn-sm btn-outline-secondary rounded-pill" @click="markNotificationAsRead(n.id)">Прочитано</button>
-                              <span
-                                class="rounded-circle flex-shrink-0 mt-1"
-                                style="width:0.55rem;height:0.55rem;"
-                                :class="n.isRead ? 'bg-secondary-subtle' : 'bg-primary shadow-sm'"
-                              ></span>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
+                <div v-else class="overflow-y-auto p-2 d-grid gap-2" style="max-height:26rem;">
+                  <div v-for="entry in notificationEntries" :key="entry.key">
+                    <NotificationItem
+                      :entry="entry"
+                      @open="openNotification(entry)"
+                      @edit="editNotification(entry)"
+                    />
                   </div>
                 </div>
               </div>
             </div>
 
-            <router-link class="nav-link px-3 rounded-pill" :to="`/profile/${userStore.user.userId}`">
+            <router-link class="nav-link px-3 rounded-pill" :to="`/users/${userStore.user.userId}`">
               {{ userStore.user.userName || userStore.user.userLogin }}
             </router-link>
 

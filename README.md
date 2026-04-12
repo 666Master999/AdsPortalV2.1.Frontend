@@ -12,3 +12,7 @@ The frontend reads the backend base URL from `VITE_API_BASE_URL`.
 - `npm run build` uses `http://adportal.runasp.net`
 
 If the frontend is served over HTTPS and the backend only exposes HTTP, the browser will block those requests. In that case, expose the backend over HTTPS or proxy it through the same origin.
+
+## Access Policy
+
+See [ACCESS_GUIDE.md](ACCESS_GUIDE.md) for the access-control rules used by this frontend.

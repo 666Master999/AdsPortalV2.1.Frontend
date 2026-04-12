@@ -4,19 +4,22 @@ import { useRoute, useRouter } from 'vue-router'
 import Sortable from 'sortablejs'
 import { useAdsStore } from '../stores/adsStore'
 import { useCategoriesStore } from '../stores/categoriesStore'
-import LocationAutocomplete from '../components/LocationAutocomplete.vue'
-import { mapApiToLocation, mapLocationToApi } from '../composables/useLocationMapper'
-import { getApiBaseUrl } from '../config/apiBase'
+import LocationCascade from '../components/LocationCascade.vue'
+import { mapApiToLocationId, mapLocationIdToApi } from '../composables/useLocationMapper'
+import { useAccessService } from '../services/accessService'
+import { getModerationStatusClass, getModerationStatusLabel, normalizeModerationStatus } from '@/utils/moderationStatus'
+import { resolveMediaUrl } from '../utils/resolveMediaUrl'
+import { normalizePatchIssues, serializePatchIssues } from '../utils/patchResult'
+import { ContractError, mapContractErrorToUi } from '../utils/apiContract'
 
 const adsStore = useAdsStore()
 const categoriesStore = useCategoriesStore()
+const access = useAccessService()
 const route = useRoute()
 const router = useRouter()
 
-const apiBase = getApiBaseUrl()
-
 function getImageUrl(path) {
-  return `${apiBase}/${path}`
+  return resolveMediaUrl(path)
 }
 
 const MAX_IMAGES = 10
@@ -27,50 +30,32 @@ const description = ref('')
 const price = ref('')
 const isNegotiable = ref(false)
 const categoryId = ref('')
-const selectedLocation = ref(null)
+const selectedLocationId = ref(null)
 const type = ref('')
 const error = ref('')
 
-function resolveModerationStatus(raw) {
-  if (raw === undefined || raw === null || raw === '') return ''
-  const normalized = String(raw).trim()
-  if (!normalized) return ''
+const editDisabledReason = computed(() => {
+  const rateLimitReason = access.getRateLimitReason()
+  if (rateLimitReason) return rateLimitReason
 
-  switch (normalized.toLowerCase()) {
-    case '0':
-    case 'pending':
-      return 'Pending'
-    case '1':
-    case 'approved':
-      return 'Approved'
-    case '2':
-    case 'rejected':
-      return 'Rejected'
-    case '3':
-    case 'hidden':
-      return 'Hidden'
-    default:
-      return normalized
+  const createBlockedReason = access.getCreateAdBlockedReason()
+  if (!createBlockedReason) return ''
+  if (createBlockedReason.includes('Создание')) {
+    return createBlockedReason.replace('Создание', 'Редактирование')
   }
-}
+  return 'Редактирование объявлений ограничено (PostBan).'
+})
 
 const moderationStatus = computed(() => {
-  return resolveModerationStatus(adsStore.selectedAd?.moderationStatus ?? adsStore.selectedAd?.status)
+  return normalizeModerationStatus(adsStore.selectedAd?.moderationStatus ?? adsStore.selectedAd?.status)
 })
 
 const moderationStatusLabel = computed(() => {
-  switch (moderationStatus.value) {
-    case 'Pending':
-      return 'На модерации'
-    case 'Approved':
-      return 'Одобрено'
-    case 'Rejected':
-      return 'Отклонено'
-    case 'Hidden':
-      return 'Скрыто'
-    default:
-      return moderationStatus.value
-  }
+  return getModerationStatusLabel(moderationStatus.value)
+})
+
+const moderationStatusBadgeClass = computed(() => {
+  return getModerationStatusClass(moderationStatus.value)
 })
 
 // ---- Изображения ----
@@ -149,26 +134,15 @@ function setMainImage(item) {
   images.value.forEach(i => (i.isMain = i.localId === item.localId))
 }
 
-function sameLocationRef(a, b) {
-  if (!a && !b) return true
-  if (!a || !b) return false
-  return a.type === b.type && Number(a.id) === Number(b.id)
+function getImageLabel(item) {
+  if (!item) return ''
+  if (item.isNew && item.file?.name) return item.file.name
+  if (!item.isNew && item.filePath) return item.filePath.split('/').pop() || 'Изображение'
+  return item.isNew ? 'Новое изображение' : 'Изображение'
 }
 
 function resolveInitialLocation(adData) {
-  return mapApiToLocation(adData)[0] ?? null
-}
-
-function onLocationSelect(item) {
-  if (item?.type === 'preset' && item.id === 'all') {
-    selectedLocation.value = null
-    return
-  }
-  selectedLocation.value = mapApiToLocation(item)[0] ?? null
-}
-
-function clearSelectedLocation() {
-  selectedLocation.value = null
+  return mapApiToLocationId(adData)
 }
 
 function initSortable() {
@@ -178,6 +152,8 @@ function initSortable() {
     animation: 180,
     ghostClass: 'sortable-ghost',
     chosenClass: 'sortable-chosen',
+    // allow dragging only for actual image items; exclude the "Add" card
+    draggable: '.image-item',
     onEnd: (evt) => {
       const { oldIndex, newIndex } = evt
       if (oldIndex === newIndex) return
@@ -232,28 +208,60 @@ function addFiles(files) {
 }
 
 async function uploadNewFiles(files) {
-  const formData = new FormData()
-  files.forEach(file => formData.append('files', file))
+  const result = await adsStore.uploadAdImages(route.params.id, files)
 
-  const response = await fetch(`${apiBase}/ads/${route.params.id}/upload`, {
-    method: 'POST',
-    body: formData,
-    headers: {
-      Authorization: `Bearer ${localStorage.getItem('token')}`,
-    },
-  })
+  const uploaded = Array.isArray(result)
+    ? result
+    : (result?.files ?? result?.filePaths ?? result?.uploadedPaths ?? result?.paths ?? result?.data ?? [])
 
-  if (!response.ok) {
-    throw new Error('Ошибка загрузки файлов')
+  return Array.isArray(uploaded) ? uploaded : []
+}
+
+function normalizeFilePath(value) {
+  return String(value || '').trim().replace(/\\/g, '/')
+}
+
+function mergePatchResults(...results) {
+  const updated = []
+  const updatedSeen = new Set()
+  const skipped = []
+  const errors = []
+  let message = ''
+  let success = true
+
+  for (const result of results) {
+    if (!result || typeof result !== 'object') continue
+
+    if (!message && result.message) {
+      message = String(result.message)
+    }
+
+    for (const field of Array.isArray(result.updated) ? result.updated : []) {
+      const key = String(field || '').trim()
+      if (!key || updatedSeen.has(key)) continue
+      updatedSeen.add(key)
+      updated.push(key)
+    }
+
+    skipped.push(...normalizePatchIssues(result.skipped))
+    errors.push(...normalizePatchIssues(result.errors, 'validation_error'))
+
+    if (result.success === false) {
+      success = false
+    }
   }
 
-  const result = await response.json()
-  return result.files || []
+  return { success, message, updated, skipped, errors }
 }
 
 async function handleUpdate() {
   try {
     error.value = ''
+
+    if (editDisabledReason.value) {
+      error.value = editDisabledReason.value
+      return
+    }
 
     const items = images.value
 
@@ -269,23 +277,28 @@ async function handleUpdate() {
     })
 
     // 2) Составляем payload по изображениям
+    const effectiveItems = items.slice(0, MAX_IMAGES)
+    const selectedMainItem = effectiveItems.find(item => item.isMain) || null
+    const initialMainImageId = initialAd.value?.mainImageId ?? null
+    const selectedMainImageId = selectedMainItem?.id ?? null
+    const mainChanged = String(initialMainImageId ?? '') !== String(selectedMainImageId ?? '')
+    const selectedMainUploadedPath = selectedMainItem?.isNew
+      ? uploadedByLocalId.get(selectedMainItem.localId) ?? null
+      : null
+    const requiresFollowUpMainImage = Boolean(mainChanged && selectedMainItem?.isNew && selectedMainUploadedPath)
+
+    const itemsForPayload = selectedMainItem && selectedMainImageId == null
+      ? [selectedMainItem, ...effectiveItems.filter(item => item.localId !== selectedMainItem.localId)]
+      : effectiveItems
+
     const imagesPayload = []
 
-    // 2.1 Удалённые
     removedImageIds.value.forEach(id => {
       imagesPayload.push({ id, delete: true })
     })
 
-    // 2.2 Текущие в порядке списка
-    const remainingExisting = items.filter(i => !i.isNew && i.id)
-    const mainBeforeId = initialImagesSnapshot.value.find(i => i.isMain)?.id ?? null
-    const mainAfterId = remainingExisting.find(i => i.isMain)?.id ?? null
-    const mainChanged = mainBeforeId !== mainAfterId
-
-    const effectiveItems = items.slice(0, MAX_IMAGES)
-    effectiveItems.forEach((item, index) => {
+    itemsForPayload.forEach((item, index) => {
       const sortOrder = index
-      const isMain = item.isMain
 
       if (item.isNew) {
         const filePath = uploadedByLocalId.get(item.localId)
@@ -294,21 +307,17 @@ async function handleUpdate() {
         imagesPayload.push({
           filePath,
           sortOrder,
-          isMain,
         })
         return
       }
 
-      // Существующие
       const original = initialImagesSnapshot.value.find(i => i.id === item.id)
       const sortOrderChanged = original ? original.sortOrder !== sortOrder : true
-      const isMainChanged = mainChanged || (original ? original.isMain !== isMain : true)
 
-      if (sortOrderChanged || isMainChanged) {
+      if (sortOrderChanged) {
         imagesPayload.push({
           id: item.id,
           sortOrder,
-          isMain,
         })
       }
     })
@@ -320,32 +329,50 @@ async function handleUpdate() {
     if (isNegotiable.value !== Boolean(initialAd.value.isNegotiable)) payload.isNegotiable = isNegotiable.value
     if (price.value !== initialAd.value.price) payload.price = price.value
     if (categoryId.value !== initialAd.value.categoryId) payload.categoryId = categoryId.value
-    if (selectedLocation.value?.type === 'region') {
-      error.value = 'Выберите город или район'
+    if (selectedLocationId.value == null) {
+      error.value = 'Выберите локацию'
       return
     }
-    if (!sameLocationRef(selectedLocation.value, initialAd.value.location)) {
-      if (!selectedLocation.value) {
-        payload.CityId = null
-        payload.DistrictId = null
-      } else {
-        Object.assign(payload, mapLocationToApi(selectedLocation.value))
-      }
+
+    // Отправляем locationId только если оно изменилось относительно исходного значения
+    const locationPayload = mapLocationIdToApi(selectedLocationId.value)
+    if (String(locationPayload.locationId ?? '') !== String(initialAd.value?.locationId ?? '')) {
+      Object.assign(payload, locationPayload)
     }
-    if (type.value !== initialAd.value.type) payload.type = type.value
+    if (type.value !== (initialAd.value.listingType ?? '')) payload.listingType = type.value
+
+    if (mainChanged && selectedMainImageId != null && !requiresFollowUpMainImage) {
+      payload.mainImageId = selectedMainImageId
+    }
 
     if (imagesPayload.length) {
       payload.images = imagesPayload
     }
 
     const result = await adsStore.updateAd(route.params.id, payload)
+    let finalResult = result
+
+    if (requiresFollowUpMainImage) {
+      const refreshedAd = await adsStore.loadAd(route.params.id)
+      const uploadedMainImage = Array.isArray(refreshedAd?.images)
+        ? refreshedAd.images.find(img => normalizeFilePath(img?.filePath) === normalizeFilePath(selectedMainUploadedPath))
+        : null
+
+      if (!uploadedMainImage?.id) {
+        throw new Error('Не удалось определить id нового главного изображения после сохранения.')
+      }
+
+      const mainImageResult = await adsStore.updateAd(route.params.id, { mainImageId: uploadedMainImage.id })
+      finalResult = mergePatchResults(result, mainImageResult)
+    }
 
     // Pass server response along to details page so user sees what happened.
     // Similar to Profile edit flow: show updated/skipped info or message.
     const query = {}
-    if (result?.message) query.message = result.message
-    if (Array.isArray(result?.updated) && result.updated.length) query.updated = result.updated.join(',')
-    if (Array.isArray(result?.skipped) && result.skipped.length) query.skipped = result.skipped.join(',')
+    if (finalResult?.message) query.message = finalResult.message
+    if (Array.isArray(finalResult?.updated) && finalResult.updated.length) query.updated = finalResult.updated.join(',')
+    if (Array.isArray(finalResult?.skipped) && finalResult.skipped.length) query.skipped = serializePatchIssues(finalResult.skipped)
+    if (Array.isArray(finalResult?.errors) && finalResult.errors.length) query.errors = serializePatchIssues(finalResult.errors)
     if (!Object.keys(query).length) query.message = 'Объявление обновлено'
 
     router.push({ path: `/ads/${route.params.id}`, query })
@@ -357,45 +384,50 @@ async function handleUpdate() {
 
 onMounted(async () => {
   categoriesStore.loadCategories()
-  await adsStore.loadAd(route.params.id)
+  try {
+    await adsStore.loadAd(route.params.id)
 
-  const adData = adsStore.selectedAd
-  if (!adData) return
+    const adData = adsStore.selectedAd
+    if (!adData) return
 
-  initialAd.value = { ...adData }
-  title.value = adData.title || ''
-  description.value = adData.description || ''
-  price.value = adData.price || ''
-  isNegotiable.value = Boolean(adData.isNegotiable)
-  categoryId.value = adData.categoryId || ''
-  type.value = adData.type || ''
+    initialAd.value = { ...adData }
+    title.value = adData.title || ''
+    description.value = adData.description || ''
+    price.value = adData.price || ''
+    isNegotiable.value = Boolean(adData.isNegotiable)
+    categoryId.value = adData.categoryId || ''
+    type.value = adData.listingType || ''
 
-  selectedLocation.value = resolveInitialLocation(adData)
-  initialAd.value = { ...adData, location: selectedLocation.value }
-  const existing = (adData.images || []).map(img =>
-    createImageItem({
-      id: img.id,
-      filePath: img.filePath,
-      isNew: false,
-      isMain: !!img.isMain,
-    })
-  )
+    selectedLocationId.value = resolveInitialLocation(adData)
+    initialAd.value = { ...adData, locationId: selectedLocationId.value }
+    const existing = (adData.images || []).map(img =>
+      createImageItem({
+        id: img.id,
+        filePath: img.filePath,
+        isNew: false,
+        isMain: img.isMain,
+      })
+    )
 
-  // Гарантируем, что одно изображение является главным
-  if (!existing.some(i => i.isMain) && existing.length) {
-    existing[0].isMain = true
+    images.value = existing
+    refreshTooManyFlags()
+    initialImagesSnapshot.value = existing.map((i, idx) => ({
+      id: i.id,
+      sortOrder: idx,
+      isMain: i.isMain,
+    }))
+
+    await nextTick()
+    initSortable()
+  } catch (e) {
+    if (e instanceof ContractError) {
+      error.value = mapContractErrorToUi(e)
+      return
+    }
+
+    console.error('Error loading ad for edit:', e)
+    error.value = e?.message || 'Ошибка загрузки объявления'
   }
-
-  images.value = existing
-  refreshTooManyFlags()
-  initialImagesSnapshot.value = existing.map((i, idx) => ({
-    id: i.id,
-    sortOrder: idx,
-    isMain: i.isMain,
-  }))
-
-  await nextTick()
-  initSortable()
 })
 
 onBeforeUnmount(() => {
@@ -408,141 +440,269 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="container">
-    <div class="row justify-content-center">
-      <div class="col-md-8">
-        <h1 class="mb-4">Редактировать объявление</h1>
-        <div v-if="moderationStatus" class="mb-3">
-          <span class="badge" :class="moderationStatus === 'Pending' ? 'bg-warning text-dark' : 'bg-secondary'">{{ moderationStatusLabel }}</span>
-          <small class="text-muted ms-2">Изменения могут отправить объявление на модерацию.</small>
+  <div class="container py-4 py-lg-5">
+    <div class="mx-auto" style="max-width: 1120px;">
+      <div class="rounded-5 border bg-body-tertiary shadow-lg overflow-hidden">
+        <div class="border-bottom px-4 px-lg-5 py-4 py-lg-5">
+          <div class="d-flex flex-column flex-lg-row justify-content-between align-items-start gap-4">
+            <div class="flex-grow-1">
+              <div class="small text-uppercase text-secondary fw-semibold mb-2">Редактирование объявления</div>
+              <h1 class="display-6 fw-semibold mb-2">Редактировать объявление</h1>
+              <p class="text-secondary mb-0 fs-5">
+                Обновите текст, локацию, тип и изображения в одном аккуратном экране.
+              </p>
+            </div>
+
+            <div class="text-lg-end">
+              <div v-if="moderationStatus" class="d-inline-flex flex-column align-items-start align-items-lg-end gap-2">
+                <span class="badge rounded-pill px-3 py-2" :class="moderationStatusBadgeClass">
+                  {{ moderationStatusLabel }}
+                </span>
+                <div class="small text-secondary">
+                  Изменения могут снова отправить объявление на модерацию.
+                </div>
+              </div>
+              <div class="mt-3 d-inline-flex flex-wrap gap-2 justify-content-lg-end">
+                <span class="badge rounded-pill text-bg-light border text-secondary px-3 py-2">
+                  {{ images.length }} / {{ MAX_IMAGES }} фото
+                </span>
+                <span class="badge rounded-pill text-bg-light border text-secondary px-3 py-2">
+                  Перетаскивание включено
+                </span>
+              </div>
+            </div>
+          </div>
         </div>
-        <div v-if="error" class="alert alert-danger">{{ error }}</div>
-        <form @submit.prevent="handleUpdate">
-          <!-- Поля формы (без изменений) -->
-          <div class="mb-3">
-            <label class="form-label">Заголовок *</label>
-            <input v-model="title" type="text" class="form-control" required />
-          </div>
 
-          <div class="mb-3">
-            <label class="form-label">Описание</label>
-            <textarea v-model="description" class="form-control" rows="4"></textarea>
-          </div>
+        <div class="px-4 px-lg-5 py-4 py-lg-5">
+          <div v-if="editDisabledReason" class="alert alert-warning rounded-4 border-0 shadow-sm">{{ editDisabledReason }}</div>
+          <div v-if="error" class="alert alert-danger rounded-4 border-0 shadow-sm">{{ error }}</div>
 
-          <div class="row mb-3">
-            <div class="col-md-6">
-              <label class="form-label">Цена (бел. руб.)</label>
-              <input v-model="price" type="number" class="form-control" />
-              <div class="form-check mt-2">
-                <input class="form-check-input" type="checkbox" v-model="isNegotiable" id="negotiableCheckbox" />
-                <label class="form-check-label" for="negotiableCheckbox">Договорная цена</label>
+          <form @submit.prevent="handleUpdate" class="d-grid gap-4">
+            <section class="card border-0 shadow-sm rounded-4">
+              <div class="card-body p-4 p-lg-5">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+                  <div>
+                    <div class="small text-uppercase text-secondary fw-semibold mb-1">Основное</div>
+                    <div class="text-secondary small">Базовые поля, которые видны в карточке объявления.</div>
+                  </div>
+                </div>
+
+                <div class="mb-3">
+                  <label class="form-label">Заголовок *</label>
+                  <input v-model="title" type="text" class="form-control form-control-lg rounded-3" required />
+                </div>
+
+                <div class="mb-3">
+                  <label class="form-label">Описание</label>
+                  <textarea v-model="description" class="form-control rounded-3" rows="5"></textarea>
+                </div>
+
+                <div class="row g-3 align-items-start">
+                  <div class="col-md-6">
+                    <label class="form-label">Цена (бел. руб.)</label>
+                    <input v-model="price" type="number" class="form-control rounded-3" />
+                    <div class="form-check mt-2">
+                      <input class="form-check-input" type="checkbox" v-model="isNegotiable" id="negotiableCheckbox" />
+                      <label class="form-check-label" for="negotiableCheckbox">Договорная цена</label>
+                    </div>
+                  </div>
+                  <div class="col-md-6">
+                    <label class="form-label">Категория *</label>
+                    <select v-model="categoryId" class="form-select rounded-3" required>
+                      <option value="" disabled>Выберите категорию</option>
+                      <option v-for="cat in categoriesStore.categories" :key="cat.id" :value="cat.id">
+                        {{ cat.name }}
+                      </option>
+                    </select>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label">Категория *</label>
-              <select v-model="categoryId" class="form-select" required>
-                <option value="" disabled>Выберите категорию</option>
-                <option v-for="cat in categoriesStore.categories" :key="cat.id" :value="cat.id">
-                  {{ cat.name }}
-                </option>
-              </select>
-            </div>
-          </div>
+            </section>
 
-          <div class="row mb-3">
-            <div class="col-md-6">
-              <label class="form-label">Местоположение</label>
-              <LocationAutocomplete
-                :selected="selectedLocation ? [selectedLocation] : []"
-                placeholder="Начните вводить город, область или район"
-                @select="onLocationSelect"
-              />
-              <div v-if="selectedLocation" class="d-flex flex-wrap align-items-center gap-2 mt-2">
-                <span class="badge text-bg-secondary">{{ selectedLocation.label || selectedLocation.name || `${selectedLocation.type}:${selectedLocation.id}` }}</span>
-                <span v-if="selectedLocation.subtitle" class="small text-secondary">{{ selectedLocation.subtitle }}</span>
-                <button type="button" class="btn btn-sm btn-outline-secondary" @click="clearSelectedLocation">Очистить</button>
+            <section class="card border-0 shadow-sm rounded-4">
+              <div class="card-body p-4 p-lg-5">
+                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+                  <div>
+                    <div class="small text-uppercase text-secondary fw-semibold mb-1">Локация и тип</div>
+                    <div class="text-secondary small">Город, район и тип объявления редактируются здесь же.</div>
+                  </div>
+                </div>
+
+                <div class="row g-4 align-items-start">
+                  <div class="col-lg-7">
+                    <label class="form-label">Местоположение</label>
+                    <div class="bg-body-tertiary border rounded-4 p-3 p-lg-4 shadow-sm">
+                      <LocationCascade v-model="selectedLocationId" />
+                    </div>
+                  </div>
+
+                  <div class="col-lg-5">
+                    <label class="form-label">Тип</label>
+                    <select v-model="type" class="form-select rounded-3">
+                      <option value="" disabled>Выберите тип</option>
+                      <option value="sell">Продажа</option>
+                      <option value="buy">Покупка</option>
+                      <option value="service">Услуга</option>
+                    </select>
+
+                    <div class="mt-3 p-3 rounded-4 bg-white border shadow-sm">
+                      <div class="fw-semibold mb-1">Подсказка</div>
+                      <div class="small text-secondary mb-0">
+                        Если меняете локацию или фото, проверяйте главное изображение и порядок карточек.
+                      </div>
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div class="col-md-6">
-              <label class="form-label">Тип</label>
-              <select v-model="type" class="form-select">
-                <option value="" disabled>Выберите тип</option>
-                <option value="sell">Продажа</option>
-                <option value="buy">Покупка</option>
-                <option value="service">Услуга</option>
-              </select>
-            </div>
-          </div>
+            </section>
 
-          <!-- Изображения -->
-          <div class="mb-3">
-            <label class="form-label">Изображения</label>
-            <input
-              ref="fileInputRef"
-              type="file"
-              class="form-control"
-              multiple
-              accept="image/*"
-              @change="onFilesSelected"
+            <section class="card border-0 shadow-sm rounded-4">
+  <div class="card-body p-4 p-lg-5">
+
+    <!-- HEADER -->
+    <div class="d-flex justify-content-between align-items-start mb-3">
+      <div>
+        <div class="small text-uppercase text-secondary fw-semibold mb-1">
+          Изображения
+        </div>
+        <div class="text-secondary small">
+          Добавляйте фото, меняйте порядок и выбирайте главное.
+        </div>
+      </div>
+
+      <div class="small text-secondary">
+        Загружено {{ images.length }} из {{ MAX_IMAGES }}
+      </div>
+    </div>
+
+    <!-- DROPZONE (если пусто) -->
+    <div
+      v-if="!images.length"
+      class="border rounded-4 bg-body-tertiary text-center p-5 mb-3"
+    >
+      <label style="cursor:pointer;">
+        <input
+          ref="fileInputRef"
+          type="file"
+          class="d-none"
+          multiple
+          accept="image/*"
+          @change="onFilesSelected"
+        />
+
+        <div class="mb-2" style="font-size: 32px;">📷</div>
+
+        <div class="fw-semibold mb-1">
+          Выберите или перетащите фотографии
+        </div>
+
+        <div class="small text-secondary mb-2">
+          JPEG, JPG, PNG до 10 МБ
+        </div>
+
+        <div class="btn btn-light border">
+          Выбрать фотографии
+        </div>
+      </label>
+    </div>
+
+    <!-- GRID -->
+    <div v-else ref="imagesListRef" class="row g-3">
+      <div
+        v-for="item in images"
+        :key="item.localId"
+        class="col-6 col-md-4 col-xl-3 image-item"
+      >
+        <div
+          class="card h-100 border rounded-4 overflow-hidden position-relative"
+          :class="[
+            item.tooMany ? 'opacity-50' : '',
+            item.isMain ? 'border-primary border-3' : 'border-light'
+          ]"
+          @click="!item.tooMany && setMainImage(item)"
+          style="cursor: pointer;"
+        >
+          <div class="ratio ratio-1x1 bg-light">
+            <img
+              :src="getPreviewUrl(item)"
+              class="w-100 h-100"
+              style="object-fit: cover;"
             />
-            <small class="form-text text-muted">
-              Всего можно загрузить до {{ MAX_IMAGES }} изображений. Сейчас: {{ images.length }}.
-            </small>
           </div>
 
-          <div v-if="images.length" class="mb-3">
-            <div class="d-flex justify-content-between mb-1">
-              <div>
-                <strong>Превью изображений</strong>
-                  <div class="text-muted small">Перетащите для изменения порядка. Первые {{ MAX_IMAGES }} будут загружены.</div>
-                </div>
-                <div class="text-muted small">Нажмите ✕, чтобы удалить.</div>
-              </div>
+          <!-- ГЛАВНОЕ -->
+          <div
+            v-if="item.isMain"
+            class="position-absolute top-0 start-0 m-2 px-2 py-1 rounded-pill bg-primary text-white d-flex align-items-center gap-1"
+            style="font-size: 12px;"
+          >
+            <span>📌</span>
+            <span>Главная</span>
+          </div>
 
-              <div ref="imagesListRef" class="row">
-                <div
-                  class="col-3 mb-2 position-relative"
-                  v-for="item in images"
-                  :key="item.localId"
-                >
-                  <img
-                    :src="getPreviewUrl(item)"
-                    class="img-fluid border"
-                    :class="{ 'border-danger': item.tooMany }"
-                    style="max-height:100px"
-                  />
+          <!-- DELETE -->
+          <button
+            class="btn btn-sm btn-light rounded-circle position-absolute top-0 end-0 m-2 shadow-sm"
+            style="width: 28px; height: 28px;"
+            @click.stop="removeImage(item)"
+            type="button"
+          >
+            ✕
+          </button>
 
-                  <button
-                    type="button"
-                    class="btn-close position-absolute top-0 end-0"
-                    aria-label="Удалить"
-                    @click="removeImage(item)"
-                  ></button>
+          <!-- STATUS -->
+          <div class="position-absolute bottom-0 start-0 p-2">
+            <span
+              class="badge rounded-pill"
+              :class="item.tooMany ? 'bg-danger' : item.isNew ? 'bg-success' : 'bg-secondary'"
+            >
+              {{ item.tooMany ? 'Не загрузится' : item.isNew ? 'Новое' : 'С сервера' }}
+            </span>
+          </div>
+        </div>
+      </div>
 
-                  <div class="form-check position-absolute top-0 start-0 bg-light p-1">
-                    <input
-                      class="form-check-input"
-                      type="radio"
-                      name="mainImage"
-                      :checked="item.isMain"
-                      :disabled="item.tooMany"
-                      @change="() => setMainImage(item)"
-                    />
-                    <label class="form-check-label small">Главное</label>
-                  </div>
+      <!-- ADD CARD -->
+      <div class="col-6 col-md-4 col-xl-3">
+        <label
+          class="card h-100 border rounded-4 d-flex align-items-center justify-content-center text-muted"
+          style="cursor:pointer;"
+        >
+          <input
+            type="file"
+            class="d-none"
+            multiple
+            accept="image/*"
+            @change="onFilesSelected"
+          />
 
-                  <div
-                    class="badge position-absolute bottom-0 start-0 m-1"
-                    :class="item.tooMany ? 'bg-danger' : 'bg-secondary'"
-                  >
-                    {{ item.tooMany ? 'Не будет загружено' : (item.isNew ? 'Новое' : 'С сервера') }}
-                  </div>
-                </div>
-              </div>
+          <div class="text-center">
+            <div style="font-size: 28px;">＋</div>
+            <div class="small">Добавить</div>
+          </div>
+        </label>
+      </div>
+    </div>
+
+    <!-- HINT -->
+    <div class="small text-secondary mt-3 d-flex align-items-start gap-2">
+      <span>⚡</span>
+      <span>
+        Качественные фотографии увеличивают шансы на отклик. Перетащите карточки, чтобы изменить порядок.
+      </span>
+    </div>
+
+  </div>
+</section>
+
+            <div class="d-flex justify-content-end">
+              <button type="submit" class="btn btn-primary btn-lg rounded-pill px-4 px-lg-5" :disabled="Boolean(editDisabledReason)">
+                Сохранить изменения
+              </button>
             </div>
-
-          <button type="submit" class="btn btn-primary">Сохранить</button>
-        </form>
+          </form>
+        </div>
       </div>
     </div>
   </div>

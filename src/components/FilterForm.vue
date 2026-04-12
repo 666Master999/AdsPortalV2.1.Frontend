@@ -1,6 +1,6 @@
 <script setup>
 import { useCategoriesStore } from '../stores/categoriesStore'
-import LocationSelector from './LocationSelector.vue'
+import LocationTree from './LocationTree.vue'
 
 const categoriesStore = useCategoriesStore()
 
@@ -11,7 +11,7 @@ const status = defineModel('status')
 const searchText = defineModel('searchText')
 const dateFrom = defineModel('dateFrom')
 const dateTo = defineModel('dateTo')
-const selectedLocations = defineModel('selectedLocations')
+const selectedLocationIds = defineModel('selectedLocationIds')
 
 const emit = defineEmits(['apply', 'clear', 'searchInput'])
 </script>
@@ -37,8 +37,9 @@ const emit = defineEmits(['apply', 'clear', 'searchInput'])
     <select v-model="status" class="form-select rounded-pill" @change="emit('apply')">
       <option value="">Любой</option>
       <option value="active">Активные</option>
-      <option value="draft">Черновики</option>
-      <option value="archived">Архивные</option>
+      <option value="pendingModeration">На модерации</option>
+      <option value="rejected">Отклонённые</option>
+      <option value="deleted">Удалённые</option>
     </select>
   </div>
 
@@ -66,8 +67,8 @@ const emit = defineEmits(['apply', 'clear', 'searchInput'])
 
   <div class="mb-3">
     <label class="form-label small text-secondary fw-semibold mb-2">Местоположение</label>
-    <LocationSelector
-      v-model="selectedLocations"
+    <LocationTree
+      v-model="selectedLocationIds"
       @update:modelValue="emit('apply')"
     />
   </div>

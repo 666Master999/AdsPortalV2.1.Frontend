@@ -1,12 +1,16 @@
 export const LocationType = Object.freeze({
-  CITY: 'city',
-  DISTRICT: 'district',
-  REGION: 'region',
+  REGION: 0,
+  CITY: 1,
+  DISTRICT: 2,
 })
 
-/**
- * @typedef {Object} LocationRef
- * @property {'city'|'district'|'region'} type
- * @property {number} id
- * @property {string|null} name
- */
+export const LOCATION_TYPE_LABELS = Object.freeze({
+  [LocationType.REGION]: 'область',
+  [LocationType.CITY]: 'город',
+  [LocationType.DISTRICT]: 'район',
+})
+
+export function normalizeLocationType(value) {
+  const type = Number(value)
+  return Number.isInteger(type) && type in LOCATION_TYPE_LABELS ? type : null
+}

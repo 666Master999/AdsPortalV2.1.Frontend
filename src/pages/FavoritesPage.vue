@@ -2,6 +2,7 @@
 import { ref, onMounted } from 'vue'
 import { useUserStore } from '../stores/userStore'
 import AdCard from '../components/AdCard.vue'
+import { mapAdDtoToViewModel } from '../features/ads/model/adMapper'
 
 const userStore = useUserStore()
 const favorites = ref([])
@@ -11,11 +12,11 @@ function adFromFav(fav) {
     ? (fav.ad && typeof fav.ad === 'object' ? fav.ad : fav)
     : { id: fav?.adId ?? fav?.id ?? null }
 
-  const mainImage = source?.mainImage ? String(source.mainImage).replace(/\\/g, '/') : (source?.mainImageUrl ?? null)
+  const mapped = mapAdDtoToViewModel(source)
 
   return {
-    ...source,
-    mainImage,
+    ...mapped,
+    mainImagePath: mapped?.mainImagePath ? String(mapped.mainImagePath).replace(/\\/g, '/') : '',
     isFavorite: true,
   }
 }

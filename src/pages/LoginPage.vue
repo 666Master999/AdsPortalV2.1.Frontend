@@ -2,6 +2,7 @@
 import { ref } from 'vue'
 import { useUserStore } from '../stores/userStore'
 import { useRouter } from 'vue-router'
+import { handleApiError, isLoginBanError, toPublicErrorMessage } from '../services/errorService'
 
 const userStore = useUserStore()
 const router = useRouter()
@@ -16,7 +17,13 @@ async function handleLogin() {
     await userStore.login(userLogin.value, password.value)
     router.push('/')
   } catch (e) {
-    error.value = e instanceof Error ? e.message : 'Ошибка входа'
+    const apiError = await handleApiError(e, { notify: false, redirect: true })
+    if (isLoginBanError(apiError)) {
+      router.push('/blocked?reason=login-ban')
+      return
+    }
+
+    error.value = toPublicErrorMessage(apiError, 'Ошибка входа')
   }
 }
 </script>

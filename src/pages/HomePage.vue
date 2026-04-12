@@ -13,9 +13,12 @@ const categoriesStore = useCategoriesStore()
 const SORT_OPTIONS = [
   { label: 'Сначала новые', value: 'createdAt-desc' },
   { label: 'Сначала старые', value: 'createdAt-asc' },
+  { label: 'Сначала обновленные', value: 'updatedAt-desc' },
+  { label: 'По названию', value: 'title-asc' },
   { label: 'Дешевле', value: 'price-asc' },
   { label: 'Дороже', value: 'price-desc' },
   { label: 'Популярные', value: 'views-desc' },
+  { label: 'Избранное', value: 'favorites-desc' },
 ]
 
 const {
@@ -34,16 +37,14 @@ const {
   dateTo,
   priceFrom,
   priceTo,
-  selectedLocations,
+  selectedLocationIds,
   adsCountLabel,
   setPage,
   setPageSize,
   setSort,
-  addFilter,
-  removeFilter,
   resetFilters,
   onSearchInput,
-  navigateWithParams,
+  applyFilters,
   initWithCategoryId,
 } = useAdsList()
 
@@ -58,15 +59,11 @@ function onSortChange() {
 }
 
 function onFilterApply() {
-  navigateWithParams({ page: 1 })
+  applyFilters()
 }
 
 function onFilterClear() {
   resetFilters()
-}
-
-function onPageChange(newPage) {
-  setPage(newPage)
 }
 
 function onPageSizeChange(newSize) {
@@ -90,12 +87,8 @@ watch(
   newId => {
     const id = String(newId || '').trim()
     if (id === category.value) return
-    if (id) {
-      addFilter({ type: 'category', value: id })
-    } else {
-      removeFilter({ type: 'category' })
-    }
-    navigateWithParams({ page: 1 })
+    category.value = id
+    applyFilters()
   }
 )
 
@@ -144,7 +137,7 @@ watch(isFiltersOpen, val => localStorage.setItem('filters-open', String(val)))
               v-model:searchText="search"
               v-model:dateFrom="dateFrom"
               v-model:dateTo="dateTo"
-              v-model:selectedLocations="selectedLocations"
+              v-model:selectedLocationIds="selectedLocationIds"
               @apply="onFilterApply"
               @clear="onFilterClear"
               @searchInput="onSearchInput"
@@ -187,6 +180,14 @@ watch(isFiltersOpen, val => localStorage.setItem('filters-open', String(val)))
                 <option v-for="opt in SORT_OPTIONS" :key="opt.value" :value="opt.value">{{ opt.label }}</option>
               </select>
             </div>
+            <div class="flex-shrink-0" style="min-width: 160px;">
+              <label class="form-label small text-uppercase text-secondary fw-semibold mb-2">Размер страницы</label>
+              <select class="form-select rounded-pill" :value="pageSize" @change="onPageSizeChange(Number($event.target.value))">
+                <option :value="10">10</option>
+                <option :value="20">20</option>
+                <option :value="50">50</option>
+              </select>
+            </div>
             <div class="d-flex align-items-end justify-content-lg-end gap-2 flex-shrink-0">
               <button type="button" class="btn btn-outline-secondary rounded-pill px-3" @click="onFilterClear">
                 Сбросить
@@ -220,7 +221,7 @@ watch(isFiltersOpen, val => localStorage.setItem('filters-open', String(val)))
                   :totalPages="totalPages"
                   :totalCount="totalCount"
                   :pageSize="pageSize"
-                  @changePage="onPageChange"
+                  @changePage="setPage"
                   @changePageSize="onPageSizeChange"
                 />
               </div>
@@ -247,7 +248,7 @@ watch(isFiltersOpen, val => localStorage.setItem('filters-open', String(val)))
           v-model:searchText="search"
           v-model:dateFrom="dateFrom"
           v-model:dateTo="dateTo"
-          v-model:selectedLocations="selectedLocations"
+          v-model:selectedLocationIds="selectedLocationIds"
           @apply="onFilterApply"
           @clear="onFilterClear"
           @searchInput="onSearchInput"

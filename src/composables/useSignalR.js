@@ -5,7 +5,7 @@ const apiBase = getApiBaseUrl()
 
 export function createSignalRConnection() {
   return new signalR.HubConnectionBuilder()
-    .withUrl(`${apiBase}/hubs/online`, {
+    .withUrl(`${apiBase}/hubs/chat`, {
       accessTokenFactory: () => localStorage.getItem('token'),
     })
     .withAutomaticReconnect()

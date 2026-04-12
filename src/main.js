@@ -2,6 +2,9 @@ import { createApp } from 'vue'
 import { createPinia } from 'pinia'
 import router from './router'
 import App from './App.vue'
+import { installAuthFlow } from './utils/authFlow'
+import { configureErrorService } from './services/errorService'
+import { useUserStore } from './stores/userStore'
 import 'bootstrap/dist/css/bootstrap.min.css'
 import 'bootstrap/dist/js/bootstrap.bundle.min.js'
 
@@ -63,10 +66,6 @@ function installFetchTracer() {
 		total += 1
 		stats[normalized] = (stats[normalized] || 0) + 1
 
-		console.log('TOTAL REQUESTS:', total)
-		console.log('STATS:', stats)
-		console.log(`%c[REQ ${id}] → ${url}`, 'color: orange', options || input)
-
 		active.set(id, {
 			url,
 			method,
@@ -81,7 +80,6 @@ function installFetchTracer() {
 			const meta = active.get(id)
 			if (meta) {
 				const time = (performance.now() - meta.start).toFixed(0)
-				console.log(`%c[RES ${id}] ✔ ${meta.url} (${time}ms)`, 'color: green')
 				active.delete(id)
 			}
 
@@ -90,8 +88,6 @@ function installFetchTracer() {
 			const meta = active.get(id)
 			if (meta) {
 				const time = (performance.now() - meta.start).toFixed(0)
-				console.log(`%c[ERR ${id}] ✖ ${meta.url} (${time}ms)`, 'color: red')
-				console.log('STACK TRACE:\n', meta.stack)
 				active.delete(id)
 			}
 
@@ -103,8 +99,14 @@ function installFetchTracer() {
 }
 
 const app = createApp(App)
-app.use(createPinia())
+const pinia = createPinia()
+app.use(pinia)
 app.use(router)
+configureErrorService({
+	router,
+	getUserStore: () => useUserStore(pinia),
+})
+installAuthFlow({ router, pinia })
 installFetchTracer()
 
 // Clean IntersectionObserver-based lazy loader for <img>

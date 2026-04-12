@@ -1,15 +1,18 @@
 <script setup>
-import { ref, reactive, onMounted, onBeforeUnmount, watch, computed, nextTick } from 'vue'
+import { ref, reactive, onBeforeUnmount, onUnmounted, watch, computed, nextTick } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useChatStore } from '../stores/chatStore'
 import { useUserStore } from '../stores/userStore'
 import { usePresenceStore } from '../stores/presenceStore'
 import { useTypingStore } from '../stores/typingStore'
-import { getApiBaseUrl } from '../config/apiBase'
 import { timeAgo, chatTime, messageTime } from '../utils/formatDate'
 import { useReadTracker } from '../composables/useReadTracker'
 import { useScrollManager } from '../composables/useScrollManager'
 import { useMediaViewer } from '../composables/useMediaViewer'
+import { useAccessService } from '../services/accessService'
+import { handleApiError, toPublicErrorMessage } from '../services/errorService'
+import { getModerationStatusClass, getModerationStatusLabel, normalizeModerationStatus } from '@/utils/moderationStatus'
+import { resolveMediaUrl } from '../utils/resolveMediaUrl'
 
 const route = useRoute()
 const router = useRouter()
@@ -17,6 +20,7 @@ const chatStore = useChatStore()
 const userStore = useUserStore()
 const presenceStore = usePresenceStore()
 const typingStore = useTypingStore()
+const access = useAccessService()
 
 // Состояние чата и редактора сообщений.
 const messagesContainer = ref(null)
@@ -37,14 +41,16 @@ const readTracker = useReadTracker(messagesContainer, (msg) => {
 })
 const scrollManager = useScrollManager(messagesContainer)
 
+onUnmounted(() => {
+  try { chatStore.clearActiveConversation && chatStore.clearActiveConversation() } catch (e) { /* ignore */ }
+})
+
 const conversationId = computed(() => route.params.conversationId || null)
 const adId = computed(() => route.params.adId || null)
 const isEditing = computed(() => composerMode.value === 'edit')
 const isSidebarOpen = ref(false)
-const currentUserId = computed(() => String(userStore.tokenUserId || userStore.user?.id || ''))
+const currentUserId = computed(() => String(userStore.user?.id ?? userStore.tokenUserId ?? ''))
 const isPendingConversation = computed(() => Boolean(pendingAdId.value && !chatStore.currentConversation?.id))
-
-const apiBase = getApiBaseUrl()
 
 // Базовые URL-утилиты и определение типов вложений.
 function isFileObject(obj) {
@@ -59,7 +65,7 @@ function buildUrl(path) {
     : path?.url || path?.path || path?.src || path?.filePath || path?.value || path?.contentUrl || path?.downloadUrl || null
   if (!rawPath) return null
   const normalized = String(rawPath).replace(/\\/g, '/')
-  return normalized.startsWith('http') ? normalized : `${apiBase}/${normalized.replace(/^\//, '')}`
+  return normalized.startsWith('http') ? normalized : resolveMediaUrl(normalized)
 }
 
 const IMG_RE = /\.(avif|bmp|gif|heic|jpeg|jpg|png|webp)$/i
@@ -173,12 +179,12 @@ function captureUnreadDivider() {
 }
 
 function isMine(msg) {
-  const msgAuthorId = String(msg.authorId ?? msg.senderId ?? '')
+  const msgAuthorId = String(msg.authorId ?? '')
   return currentUserId.value && msgAuthorId === currentUserId.value
 }
 
 function getAuthorName(msg) {
-  return msg.author?.userName || msg.author?.userLogin || msg.authorName || msg.senderName || msg.userName || null
+  return msg.author?.userName || msg.author?.userLogin || msg.authorName || null
 }
 
 function getAuthorAvatar(msg) {
@@ -410,7 +416,7 @@ function selectConversation(id) { if (id) router.push(`/chat/${id}`) }
 async function initChat() {
   try {
     const prevConvId = chatStore.currentConversation?.id
-    if (prevConvId) await presenceStore.leaveGroup(prevConvId)
+    if (prevConvId) await presenceStore.leaveConversation(prevConvId)
     unreadDividerId.value = null
     scrollManager.firstUnreadId.value = null
     readTracker.disconnectObserver()
@@ -421,9 +427,7 @@ async function initChat() {
       pendingAdId.value = null
       await chatStore.loadConversation(conversationId.value, { skipConversationsFetch: true })
       captureUnreadDivider()
-      await presenceStore.joinGroup(conversationId.value)
-      const companion = chatStore.currentConversation?.companion ?? null
-      if (companion?.id != null && companion?.isOnline) presenceStore.seedOnlineUsers(conversationId.value, [String(companion.id)])
+      await presenceStore.joinConversation(conversationId.value)
       scrollManager.scrollToAnchorOrBottom(chatStore.anchorMessageId)
       // Expose store for quick debugging in DevTools console.
       try { window.__chatStore = chatStore } catch {}
@@ -447,11 +451,17 @@ async function initChat() {
     chatStore.currentConversationId = null
     chatStore.clearMessages()
   } catch (err) {
-    chatStore.error = err?.message || 'Ошибка загрузки чата'
+    const apiError = await handleApiError(err, { notify: false })
+    chatStore.error = toPublicErrorMessage(apiError, 'Ошибка загрузки чата')
   }
 }
 
 async function onSubmit() {
+  if (!canSendMessage.value) {
+    chatStore.error = sendDisabledReason.value || 'Отправка сообщений недоступна.'
+    return
+  }
+
   try {
     if (isEditing.value) {
       await confirmEdit()
@@ -460,11 +470,14 @@ async function onSubmit() {
     }
     chatStore.error = null
   } catch (err) {
-    chatStore.error = err?.message || 'Ошибка отправки сообщения'
+    const apiError = await handleApiError(err, { notify: false })
+    chatStore.error = toPublicErrorMessage(apiError, 'Ошибка отправки сообщения')
   }
 }
 
 async function onAttach(e) {
+  if (!canSendMessage.value) return
+
   const files = Array.from(e.target.files || [])
   try { e.target.value = '' } catch {}
   if (!files.length) return
@@ -476,16 +489,18 @@ async function onAttach(e) {
 async function loadMore() {
   const container = messagesContainer.value
   const prevH = container?.scrollHeight ?? 0
-  await chatStore.loadMoreMessages()
+  try {
+    await chatStore.loadMoreMessages()
+  } catch (err) {
+    const apiError = await handleApiError(err, { notify: false })
+    chatStore.error = toPublicErrorMessage(apiError, 'Ошибка загрузки чата')
+    return
+  }
   await nextTick()
   if (container) container.scrollTop = container.scrollHeight - prevH
 }
 
-onMounted(() => {
-  initChat()
-})
-watch(() => route.params.conversationId, initChat)
-watch(() => route.params.adId, initChat)
+watch([() => route.params.conversationId, () => route.params.adId], initChat, { immediate: true })
 
 watch(() => chatStore.messages.length, () => {
   nextTick(() => readTracker.observeMessages())
@@ -506,7 +521,7 @@ watch(() => chatStore.lastKnownId, (newId, oldId) => {
 
 onBeforeUnmount(() => {
   const prevConvId = chatStore.currentConversation?.id
-  if (prevConvId) presenceStore.leaveGroup(prevConvId)
+  if (prevConvId) presenceStore.leaveConversation(prevConvId)
   readTracker.cleanup()
   try { delete window.__chatStore } catch {}
   for (const m of chatStore.messages || []) cleanupMessagePreviews(m)
@@ -519,29 +534,46 @@ const currentConv = computed(() => chatStore.currentConversation)
 const selectedConversationId = computed(() => String(route.params.conversationId || ''))
 const isConversationSelected = computed(() => Boolean(selectedConversationId.value || isPendingConversation.value))
 
-const adImageUrl = computed(() => buildUrl(currentConv.value?.ad?.image ?? currentConv.value?.ad?.mainImagePath))
+const adImageUrl = computed(() => buildUrl(currentConv.value?.ad?.mainImagePath))
 const adLink = computed(() => currentConv.value?.ad?.id ? `/ads/${currentConv.value.ad.id}` : null)
 
 const moderation = computed(() => {
-  const key = String(currentConv.value?.ad?.moderationStatus ?? currentConv.value?.moderationStatus ?? '').trim().toLowerCase()
-  const map = {
-    '0': ['На модерации', 'bg-warning text-dark'], 'pending': ['На модерации', 'bg-warning text-dark'],
-    '1': ['Одобрено', 'bg-success'],              'approved': ['Одобрено', 'bg-success'],
-    '2': ['Отклонено', 'bg-danger'],              'rejected': ['Отклонено', 'bg-danger'],
-    '3': ['Скрыто', 'bg-secondary'],              'hidden':   ['Скрыто', 'bg-secondary'],
+  const value = normalizeModerationStatus(currentConv.value?.ad?.moderationStatus ?? currentConv.value?.moderationStatus)
+  return {
+    label: getModerationStatusLabel(value) || 'не указан',
+    cls: getModerationStatusClass(value),
   }
-  const [label, cls] = map[key] || [key || 'не указан', 'bg-secondary']
-  return { label, cls }
 })
 
 const companion = computed(() => {
   const user = currentConv.value?.companion
   if (!user) return null
-  return { id: user.id, name: user.name ?? user.userName ?? user.userLogin ?? null, avatar: buildUrl(user.avatar), lastActivityAt: user.lastActivityAt ?? null, isOnline: user.isOnline ?? null }
+  return {
+    id: user.id,
+    name: user.name ?? null,
+    avatar: buildUrl(user.avatarPath),
+    lastActivityAt: user.lastActivityAt ?? null,
+    isOnline: user.isOnline ?? null,
+  }
 })
+
+const sendDisabledReason = computed(() => {
+  const targetUserId = companion.value?.id ?? currentConv.value?.companion?.id
+  return access.getSendMessageBlockedReason(targetUserId)
+})
+
+const canSendMessage = computed(() => !sendDisabledReason.value)
 
 const typingUsers = computed(() => typingStore.getTypingUsers(conversationId.value))
 const companionTyping = computed(() => typingUsers.value.length > 0)
+const companionDialogConversationId = computed(() => presenceStore.getUserDialogConversationId(companion.value?.id))
+const companionInDialog = computed(() => {
+  const dialogConversationId = companionDialogConversationId.value
+  const currentConversationId = String(conversationId.value ?? '')
+  return Boolean(dialogConversationId && currentConversationId && String(dialogConversationId) === currentConversationId)
+})
+
+const companionHasDialog = computed(() => Boolean(companionDialogConversationId.value))
 
 const typingIndicatorText = computed(() => {
   if (!typingUsers.value.length) return '8888'
@@ -558,7 +590,8 @@ const typingIndicatorText = computed(() => {
 const lastSeenText = computed(() => {
   if (!presenceStore.isPresenceReady) return '...'
   if (companionTyping.value) return typingIndicatorText.value
-  if (presenceStore.isOnline(conversationId.value, companion.value?.id)) return 'в сети'
+  if (companionInDialog.value) return 'в диалоге'
+  if (presenceStore.isOnline(companion.value?.id)) return 'в сети'
   const last = companion.value?.lastActivityAt
   if (!last) return 'был(а) давно'
   return timeAgo(last, { prefix: 'Был(а) в сети ' })
@@ -567,7 +600,8 @@ const lastSeenText = computed(() => {
 const lastSeenClass = computed(() => {
   if (!presenceStore.isPresenceReady) return 'text-secondary'
   if (companionTyping.value) return 'text-primary'
-  if (presenceStore.isOnline(conversationId.value, companion.value?.id)) return 'text-success'
+  if (companionInDialog.value) return 'text-info'
+  if (presenceStore.isOnline(companion.value?.id)) return 'text-success'
   return 'text-secondary'
 })
 
@@ -627,8 +661,8 @@ function onTextareaInput(e) {
               <div class="d-flex align-items-start gap-3">
                 <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
                   <img
-                    v-if="conv.ad?.image || conv.ad?.mainImagePath"
-                    v-intersect-lazy="buildUrl(conv.ad.image ?? conv.ad.mainImagePath)"
+                    v-if="conv.ad?.mainImagePath"
+                    v-intersect-lazy="buildUrl(conv.ad.mainImagePath)"
                     alt="ad"
                     class="w-100 h-100"
                     style="object-fit: cover;"
@@ -670,10 +704,14 @@ function onTextareaInput(e) {
             <!-- Шапка диалога с собеседником и действиями. -->
             <div class="bg-white border-bottom px-3 px-lg-4 py-3 d-flex align-items-start justify-content-between gap-3">
               <button class="btn d-lg-none me-2" type="button" @click="isSidebarOpen = true">☰</button>
-              <component :is="companion?.id ? 'router-link' : 'div'" :to="companion?.id ? `/profile/${companion.id}` : null" class="d-flex align-items-center gap-3 text-decoration-none text-body min-w-0">
-                <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 44px; height: 44px;">
+              <component :is="companion?.id ? 'router-link' : 'div'" :to="companion?.id ? `/users/${companion.id}` : null" class="d-flex align-items-center gap-3 text-decoration-none text-body min-w-0">
+                <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 44px; height: 44px; position: relative;">
                   <img v-if="companion?.avatar" v-intersect-lazy="companion.avatar" class="w-100 h-100" style="object-fit: cover;" alt="">
                   <span v-else class="fw-semibold text-secondary">{{ getInitial(companion?.name, '') }}</span>
+                  <!-- Online indicator (green) -->
+                  <span v-if="presenceStore.isOnline(companion?.id)" class="d-inline-block" style="position: absolute; right: -2px; bottom: -2px; width: 12px; height: 12px; border-radius: 50%; background: #198754; border: 2px solid #fff;"></span>
+                  <!-- Dialog identifier indicator (purple) -->
+                  <span v-if="companionHasDialog" class="d-inline-block" style="position: absolute; right: 10px; bottom: -2px; width: 10px; height: 10px; border-radius: 50%; background: #6f42c1; border: 2px solid #fff;"></span>
                 </div>
                 <div class="min-w-0">
                   <div class="fw-semibold text-truncate">{{ companion?.name }}</div>
@@ -740,7 +778,7 @@ function onTextareaInput(e) {
 
                 <!-- Пузырь сообщения и его содержимое. -->
                 <div class="d-inline-block min-w-0" :style="getMessageContentStyle(msg)">
-                  <div v-if="!isMine(msg)" class="small text-secondary mb-1 ms-1">{{ getAuthorName(msg) ?? msg.authorId ?? msg.senderId ?? 'нет данных' }}</div>
+                  <div v-if="!isMine(msg)" class="small text-secondary mb-1 ms-1">{{ getAuthorName(msg) ?? msg.authorId ?? 'нет данных' }}</div>
                   <div class="px-3 py-2 px-lg-4 py-lg-3 rounded-4 shadow-sm border position-relative"
                     :class="[
                       getMessageBubbleClass(msg),
@@ -934,6 +972,9 @@ function onTextareaInput(e) {
                 <span class="spinner-grow spinner-grow-sm" style="width: 0.5rem; height: 0.5rem;" role="status"></span>
                 {{ typingIndicatorText }}
               </div>
+              <div v-if="sendDisabledReason" class="alert alert-warning py-2 px-3 mb-3">
+                {{ sendDisabledReason }}
+              </div>
               <div v-if="composerMode === 'edit'" class="d-flex align-items-center justify-content-between gap-3 rounded-4 border bg-warning-subtle px-3 py-2 mb-3 small">
                 <span class="text-secondary">✏️ Редактирование сообщения</span>
                 <button type="button" class="btn-close btn-sm" @click="cancelEdit"></button>
@@ -967,24 +1008,31 @@ function onTextareaInput(e) {
               </div>
 
               <form @submit.prevent="onSubmit" class="d-flex align-items-end gap-2 gap-lg-3">
-                <label class="btn btn-light border rounded-circle flex-shrink-0 mb-0 d-inline-flex align-items-center justify-content-center" :title="isEditing ? 'Прикрепить изображение' : 'Прикрепить файл'" style="width: 44px; height: 44px;">
+                <label
+                  class="btn btn-light border rounded-circle flex-shrink-0 mb-0 d-inline-flex align-items-center justify-content-center"
+                  :class="!canSendMessage ? 'disabled opacity-50' : ''"
+                  :title="!canSendMessage ? sendDisabledReason : (isEditing ? 'Прикрепить изображение' : 'Прикрепить файл')"
+                  style="width: 44px; height: 44px;"
+                >
                   📎
-                  <input type="file" multiple @change="onAttach" class="d-none" />
+                  <input type="file" multiple @change="onAttach" class="d-none" :disabled="!canSendMessage" />
                 </label>
                 <textarea
                   ref="messageTextarea"
                   v-model="composer.text"
                   class="form-control bg-body-tertiary border-0 rounded-4 flex-grow-1 px-3 py-2"
                   rows="1"
-                  placeholder="Написать сообщение..."
+                  :placeholder="canSendMessage ? 'Написать сообщение...' : 'Отправка недоступна'"
                   style="resize: none; overflow-y: auto; min-height: 44px; max-height: 140px;"
                   @keydown.enter.exact.prevent="onSubmit"
                   @input="onTextareaInput"
+                  :disabled="!canSendMessage"
                 ></textarea>
                 <button
                   type="submit"
                   class="btn btn-primary rounded-circle flex-shrink-0 d-inline-flex align-items-center justify-content-center"
                   style="width: 44px; height: 44px;"
+                  :disabled="!canSendMessage"
                 >
                   &#10148;
                 </button>
@@ -1054,8 +1102,8 @@ function onTextareaInput(e) {
           <div class="d-flex align-items-start gap-3">
             <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 48px; height: 48px;">
               <img
-                v-if="conv.ad?.image || conv.ad?.mainImagePath"
-                v-intersect-lazy="buildUrl(conv.ad.image ?? conv.ad.mainImagePath)"
+                v-if="conv.ad?.mainImagePath"
+                v-intersect-lazy="buildUrl(conv.ad.mainImagePath)"
                 alt="ad"
                 class="w-100 h-100"
                 style="object-fit: cover;"

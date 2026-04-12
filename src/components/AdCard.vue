@@ -1,11 +1,12 @@
 <script setup>
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '../stores/userStore'
-import { getApiBaseUrl } from '../config/apiBase'
 import { timeAgo } from '../utils/formatDate'
-
-const apiBase = getApiBaseUrl()
+import { useLocations } from '../composables/useLocations'
+import { useAccessService } from '../services/accessService'
+import { getModerationStatusClass, getModerationStatusLabel, normalizeModerationStatus } from '@/utils/moderationStatus'
+import { resolveMediaUrl } from '../utils/resolveMediaUrl'
 
 const props = defineProps({
   ad: Object,
@@ -17,6 +18,8 @@ const props = defineProps({
 
 const router = useRouter()
 const userStore = useUserStore()
+const access = useAccessService()
+const { loadTree, getLocationPathLabel } = useLocations()
 
 function goToAd() {
   if (props.ad?.id) router.push(`/ads/${props.ad.id}`)
@@ -31,81 +34,48 @@ const priceText = computed(() => {
   return `${p} Br`
 })
 
-const cityText = computed(() => {
+const locationText = computed(() => {
   const a = props.ad
   if (!a) return ''
-  const district = a.district || a.District
-  const city = a.city || a.City
-  if (district?.name) return district.name
-  if (city?.name) return city.name
-  return ''
+  return getLocationPathLabel(a.locationId) || 'Локация не указана'
 })
 
-function resolveModerationStatus(raw) {
-  if (raw === undefined || raw === null || raw === '') return ''
-  const normalized = String(raw).trim()
-  if (!normalized) return ''
-
-  switch (normalized.toLowerCase()) {
-    case '0':
-    case 'pending':
-      return 'Pending'
-    case '1':
-    case 'approved':
-      return 'Approved'
-    case '2':
-    case 'rejected':
-      return 'Rejected'
-    case '3':
-    case 'hidden':
-      return 'Hidden'
-    default:
-      return normalized
-  }
-}
-
 const moderationStatus = computed(() => {
-  return resolveModerationStatus(props.ad?.moderationStatus ?? props.ad?.status)
+  return normalizeModerationStatus(props.ad?.moderationStatus ?? props.ad?.status)
 })
 
 const moderationStatusLabel = computed(() => {
-  switch (moderationStatus.value) {
-    case 'Pending':
-      return 'На модерации'
-    case 'Approved':
-      return 'Одобрено'
-    case 'Rejected':
-      return 'Отклонено'
-    case 'Hidden':
-      return 'Скрыто'
-    default:
-      return moderationStatus.value
-  }
+  return getModerationStatusLabel(moderationStatus.value)
 })
 
 const moderationStatusClass = computed(() => {
-  switch (moderationStatus.value) {
-    case 'Pending':
-      return 'bg-warning text-dark'
-    case 'Approved':
-      return 'bg-success'
-    case 'Rejected':
-      return 'bg-danger'
-    case 'Hidden':
-      return 'bg-secondary'
-    default:
-      return 'bg-secondary'
-  }
+  return getModerationStatusClass(moderationStatus.value)
 })
 
 const isFavorite = ref(Boolean(props.ad?.isFavorite))
 
+const currentUserId = computed(() => userStore.user?.userId || userStore.tokenUserId || null)
+const adOwnerId = computed(() => (
+  props.ad?.user?.id ?? props.ad?.userId ?? null
+))
+const isOwner = computed(() => {
+  if (!currentUserId.value || !adOwnerId.value) return false
+  return String(currentUserId.value) === String(adOwnerId.value)
+})
+
+const rejectionReason = computed(() => {
+  return props.ad?.rejectionReason || ''
+})
+
+const canSeeDeleted = computed(() => isOwner.value || access.canAccessAdmin())
+const isDeletedStatus = computed(() => moderationStatus.value === 'deleted')
+const shouldRenderCard = computed(() => {
+  return !isDeletedStatus.value || canSeeDeleted.value
+})
+
 const canEdit = computed(() => {
   if (!props.allowEdit) return false
-  const currentUserId = userStore.user?.userId || userStore.tokenUserId
-  const adOwnerId = props.ad?.user?.id || props.ad?.userId
-  const isOwner = currentUserId && adOwnerId && String(currentUserId) === String(adOwnerId)
-  return isOwner || userStore.isAdmin
+  return isOwner.value || access.canAccessAdmin()
 })
 
 watch(
@@ -116,6 +86,10 @@ watch(
     }
   }
 )
+
+onMounted(() => {
+  void loadTree()
+})
 
 async function toggleFavorite() {
   const userId = userStore.user?.userId || userStore.tokenUserId
@@ -136,11 +110,11 @@ async function toggleFavorite() {
 </script>
 
 <template>
-  <div v-if="ad" class="ad-card card h-100 border-0 rounded-4 shadow-sm overflow-hidden bg-white" @click="goToAd">
+  <div v-if="ad && shouldRenderCard" class="ad-card card h-100 border-0 rounded-4 shadow-sm overflow-hidden bg-white" @click="goToAd">
     <div class="ad-card-media position-relative bg-body-tertiary">
       <img
-        v-if="ad.mainImageUrl || ad.mainImage"
-        :src="apiBase + '/' + (ad.mainImageUrl || ad.mainImage)"
+        v-if="ad.mainImagePath"
+        :src="resolveMediaUrl(ad.mainImagePath)"
         class="ad-card-media-image w-100 h-100"
         :alt="ad.title ?? ''"
         @error="e => e.target.style.display = 'none'"
@@ -174,12 +148,16 @@ async function toggleFavorite() {
       <h6 class="card-title mb-2 lh-sm fw-semibold text-truncate" :title="ad.title ?? ''">{{ ad.title }}</h6>
 
       <div class="ad-card-meta d-flex align-items-center gap-2 text-muted small mb-3 flex-wrap">
-        <span v-if="cityText" class="d-inline-flex align-items-center gap-1">
+        <span v-if="locationText" class="d-inline-flex align-items-center gap-1">
           <span>📍</span>
-          <span class="text-truncate">{{ cityText }}</span>
+          <span class="text-truncate">{{ locationText }}</span>
         </span>
         <span v-if="ad.updatedAt || ad.createdAt" class="text-secondary">·</span>
         <span>{{ ad.updatedAt ? timeAgo(ad.updatedAt) : (ad.createdAt ? timeAgo(ad.createdAt) : '') }}</span>
+      </div>
+
+      <div v-if="moderationStatus === 'rejected' && isOwner && rejectionReason" class="small text-danger mb-3">
+        Причина отклонения: {{ rejectionReason }}
       </div>
 
       <div v-if="ad.viewsCount != null || ad.favoritesCount != null" class="d-flex gap-2 text-muted small mb-3 flex-wrap">

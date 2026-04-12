@@ -29,25 +29,14 @@ function parseDate(value) {
   if (!value) return null
   if (value instanceof Date) return value
 
-  const raw = String(value).trim()
+  let raw = String(value).trim()
 
-  // ISO+z with offset or Z
-  if (/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?([Zz]|[+-]\d{2}:?\d{2})$/.test(raw)) {
-    const d = new Date(raw)
-    return isNaN(d.getTime()) ? null : d
-  }
-
-  // Если в формате "YYYY-MM-DDTHH:mm:ss" без суффикса, считаем UTC (чтобы не зависеть от локали клиента)
-  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?$/.test(raw)) {
-    const d = new Date(raw + 'Z')
-    return isNaN(d.getTime()) ? null : d
-  }
-
-  // Пытаемся распарсить как числовой timestamp или «обычный» Date-совместимый строковый формат
-  const numeric = Number(raw)
-  if (!Number.isNaN(numeric)) {
-    const d = new Date(numeric)
-    if (!isNaN(d.getTime())) return d
+  // если нет Z или timezone → считаем UTC
+  if (
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(raw) &&
+    !/[Zz]|[+-]\d{2}:?\d{2}$/.test(raw)
+  ) {
+    raw += 'Z'
   }
 
   const d = new Date(raw)

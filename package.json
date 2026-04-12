@@ -6,7 +6,11 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "swagger:pull": "curl -k https://localhost:7119/swagger/v1/swagger.json -o swagger.json",
+    "swagger:types": "openapi-typescript swagger.json -o src/api/types.ts",
+    "swagger:zod": "openapi-zod-client swagger.json -o src/api/zod.ts",
+    "swagger:all": "npm run swagger:pull && npm run swagger:types && npm run swagger:zod"
   },
   "dependencies": {
     "@microsoft/signalr": "^10.0.0",
@@ -19,6 +23,8 @@
   },
   "devDependencies": {
     "@vitejs/plugin-vue": "^6.0.2",
+    "openapi-typescript": "^7.13.0",
+    "openapi-zod-client": "^1.18.3",
     "vite": "^7.3.1"
   }
 }

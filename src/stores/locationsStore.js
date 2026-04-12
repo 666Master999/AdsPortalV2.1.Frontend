@@ -1,114 +1,155 @@
 import { defineStore } from 'pinia'
-import { ref, reactive } from 'vue'
-import { getApiBaseUrl } from '../config/apiBase'
+import { reactive, ref } from 'vue'
 import { fetchDeduped } from '../utils/fetchDeduped'
+import { LOCATION_TYPE_LABELS, LocationType, normalizeLocationType } from '../types/location'
+import { apiClient } from '../api/apiClient'
 
-const VALID_LOCATION_TYPES = new Set(['region', 'city', 'district'])
-const TYPE_LABELS = {
-  region: 'область',
-  city: 'город',
-  district: 'район',
+function toId(value) {
+  const id = Number(value)
+  return Number.isInteger(id) && id > 0 ? id : null
 }
 
-function extractResults(data) {
-  if (Array.isArray(data)) return data
-  if (Array.isArray(data?.items)) return data.items
-  if (Array.isArray(data?.data)) return data.data
-  return []
-}
+function normalizeNode(node) {
+  if (!node || typeof node !== 'object') return null
 
-function normalizeSearchItem(item) {
-  const type = String(item?.type ?? item?.locationType ?? item?.kind ?? item?.entityType ?? '').trim().toLowerCase()
-  const id = Number(item?.id ?? item?.locationId ?? item?.entityId)
-  if (!VALID_LOCATION_TYPES.has(type) || !Number.isInteger(id) || id <= 0) return null
+  // Strict mapping according to API contract:
+  // Expect shape: { id: number, name: string, type: "region"|"city"|"district", children: [] }
+  const id = toId(node.id)
+  const name = String(node.name ?? '').trim()
 
-  const name = String(item?.name ?? item?.title ?? '').trim()
-  const subtitle = String(item?.subtitle ?? item?.regionName ?? item?.cityName ?? '').trim()
-  const label = String(item?.label ?? `${name} (${TYPE_LABELS[type] || type})`).trim()
+  let type = null
+  const rawType = node.type
+  if (typeof rawType === 'string') {
+    const t = rawType.toLowerCase().trim()
+    if (t === 'region') type = LocationType.REGION
+    else if (t === 'city') type = LocationType.CITY
+    else if (t === 'district') type = LocationType.DISTRICT
+  }
+
+  const children = Array.isArray(node.children) ? node.children : []
+
+  if (id == null || type == null || !name) return null
 
   return {
-    ...item,
-    type,
     id,
     name,
-    subtitle,
-    label,
+    type,
+    children,
+  }
+}
+
+function indexTree(nodes, parent = null, ancestry = [], byId, parentById, pathById) {
+  const output = []
+
+  for (const node of nodes) {
+    const normalized = normalizeNode(node)
+    if (!normalized) continue
+
+    parentById[normalized.id] = parent
+    pathById[normalized.id] = [...ancestry, normalized]
+
+    normalized.children = indexTree(
+      normalized.children,
+      normalized.id,
+      pathById[normalized.id],
+      byId,
+      parentById,
+      pathById,
+    )
+
+    byId[normalized.id] = normalized
+    output.push(normalized)
+  }
+
+  return output
+}
+
+function clearReactiveObject(target) {
+  for (const key of Object.keys(target)) {
+    delete target[key]
   }
 }
 
 export const useLocationsStore = defineStore('locations', () => {
-  const regions = ref([])
-  const citiesByRegion = reactive({})
-  const districtsByCity = reactive({})
-  const loadingCities = reactive({})
-  const loadingDistricts = reactive({})
+  const tree = ref([])
+  const treeLoaded = ref(false)
+  const nodesById = reactive({})
+  const parentById = reactive({})
+  const pathById = reactive({})
 
-  const apiBase = getApiBaseUrl()
+  function rebuildIndexes(nextTree) {
+    clearReactiveObject(nodesById)
+    clearReactiveObject(parentById)
+    clearReactiveObject(pathById)
+    tree.value = indexTree(Array.isArray(nextTree) ? nextTree : [], null, [], nodesById, parentById, pathById)
+  }
 
-  async function loadRegions() {
-    if (regions.value.length) return regions.value
-    return fetchDeduped('regions', async () => {
-      const response = await fetch(`${apiBase}/regions`)
-      regions.value = await response.json()
-      return regions.value
+  async function loadTree() {
+    if (treeLoaded.value) return tree.value
+
+    return fetchDeduped('locations', async () => {
+      const data = await apiClient.get('/locations', {
+        errorHandlerOptions: { notify: false },
+      })
+      rebuildIndexes(Array.isArray(data) ? data : [])
+      treeLoaded.value = true
+      return tree.value
     })
   }
 
-  async function loadCitiesByRegion(regionId) {
-    if (citiesByRegion[regionId] !== undefined) return citiesByRegion[regionId]
-    loadingCities[regionId] = true
-    try {
-      return await fetchDeduped(`cities:${regionId}`, async () => {
-        const response = await fetch(`${apiBase}/cities?regionId=${regionId}`)
-        citiesByRegion[regionId] = await response.json()
-        return citiesByRegion[regionId]
-      })
-    } finally {
-      loadingCities[regionId] = false
-    }
+  function findLocationById(id) {
+    const locationId = toId(id)
+    if (locationId == null) return null
+    return nodesById[locationId] || null
   }
 
-  async function loadDistrictsByCity(cityId) {
-    if (districtsByCity[cityId] !== undefined) return districtsByCity[cityId]
-    loadingDistricts[cityId] = true
-    try {
-      return await fetchDeduped(`districts:${cityId}`, async () => {
-        const response = await fetch(`${apiBase}/districts?cityId=${cityId}`)
-        districtsByCity[cityId] = await response.json()
-        return districtsByCity[cityId]
-      })
-    } finally {
-      loadingDistricts[cityId] = false
-    }
+  function getRootLocations() {
+    return tree.value
   }
 
-  async function searchLocations(query, signal) {
-    const trimmedQuery = query?.trim()
-    if (!trimmedQuery) return []
+  function getLocationChildren(id) {
+    const locationId = toId(id)
+    if (locationId == null) return tree.value
+    return nodesById[locationId]?.children || []
+  }
 
-    try {
-      const response = await fetch(
-        `${apiBase}/locations/search?q=${encodeURIComponent(trimmedQuery)}`,
-        signal ? { signal } : undefined
-      )
-      if (!response.ok) return []
-      const data = await response.json()
-      return extractResults(data).map(normalizeSearchItem).filter(Boolean)
-    } catch (err) {
-      if (err?.name === 'AbortError') return []
-      throw err
-    }
+  function hasLocationChildren(id) {
+    return getLocationChildren(id).length > 0
+  }
+
+  function getLocationPath(id) {
+    const locationId = toId(id)
+    if (locationId == null) return []
+    return pathById[locationId] || []
+  }
+
+  function getLocationPathLabel(id) {
+    const path = getLocationPath(id)
+    if (!path.length) return ''
+    return path.map(node => node.name).join(' / ')
+  }
+
+  function getLocationLabel(id) {
+    const pathLabel = getLocationPathLabel(id)
+    return pathLabel || 'Локация не указана'
+  }
+
+  function getLocationTypeLabel(type) {
+    const normalized = normalizeLocationType(type)
+    return normalized == null ? '' : LOCATION_TYPE_LABELS[normalized] || ''
   }
 
   return {
-    regions,
-    citiesByRegion,
-    districtsByCity,
-    loadingCities,
-    loadingDistricts,
-    loadRegions,
-    loadCitiesByRegion,
-    loadDistrictsByCity,
-    searchLocations,
+    tree,
+    treeLoaded,
+    loadTree,
+    findLocationById,
+    getRootLocations,
+    getLocationChildren,
+    hasLocationChildren,
+    getLocationPath,
+    getLocationPathLabel,
+    getLocationLabel,
+    getLocationTypeLabel,
   }
 })

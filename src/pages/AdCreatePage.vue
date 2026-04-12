@@ -1,14 +1,16 @@
 <script setup>
-    import { ref, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
+    import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
     import { useRouter } from 'vue-router'
     import Sortable from 'sortablejs'
     import { useAdsStore } from '../stores/adsStore'
     import { useCategoriesStore } from '../stores/categoriesStore'
-    import LocationAutocomplete from '../components/LocationAutocomplete.vue'
-    import { mapApiToLocation, mapLocationToApi } from '../composables/useLocationMapper'
+    import LocationCascade from '../components/LocationCascade.vue'
+    import { mapLocationIdToApi } from '../composables/useLocationMapper'
+    import { useAccessService } from '../services/accessService'
 
     const adsStore = useAdsStore()
     const categoriesStore = useCategoriesStore()
+    const access = useAccessService()
     const router = useRouter()
 
     const URL = window.URL || globalThis.URL
@@ -19,9 +21,13 @@
     const price = ref('')
     const isNegotiable = ref(false)
     const categoryId = ref('')
-    const selectedLocation = ref(null)
+    const selectedLocationId = ref(null)
     const type = ref('')
     const error = ref('')
+
+    const createDisabledReason = computed(() => {
+        return access.getCreateAdBlockedReason() || access.getRateLimitReason()
+    })
 
     const images = ref([]) // { localId, file, isNew, isMain }
     const imagesListRef = ref(null)
@@ -125,6 +131,7 @@
             animation: 180,
             ghostClass: 'sortable-ghost',
             chosenClass: 'sortable-chosen',
+            draggable: '.image-item',
             onEnd: (evt) => {
                 const { oldIndex, newIndex } = evt
                 if (oldIndex === newIndex) return
@@ -135,71 +142,52 @@
         })
     }
 
-    function onLocationSelect(item) {
-        if (item?.type === 'preset' && item.id === 'all') {
-            selectedLocation.value = null
-            return
-        }
-        selectedLocation.value = mapApiToLocation(item)[0] ?? null
-    }
-
-    function clearSelectedLocation() {
-        selectedLocation.value = null
-    }
-
     async function handleCreate() {
         try {
             error.value = ''
 
-            const form = new FormData()
-            form.append('title', title.value)
-            form.append('description', description.value)
-            if (isNegotiable.value) {
-                form.append('isNegotiable', 'true')
-            }
-            if (price.value !== '' && price.value != null) {
-                form.append('price', price.value)
-            }
-            form.append('categoryId', categoryId.value)
-            if (selectedLocation.value?.type === 'region') {
-                error.value = 'Выберите город или район'
+            if (createDisabledReason.value) {
+                error.value = createDisabledReason.value
                 return
             }
-            const locationPayload = mapLocationToApi(selectedLocation.value)
-            if (locationPayload.CityId != null) {
-                form.append('CityId', String(locationPayload.CityId))
-            }
-            if (locationPayload.DistrictId != null) {
-                form.append('DistrictId', String(locationPayload.DistrictId))
-            }
-            form.append('type', type.value)
 
+            if (selectedLocationId.value == null) {
+                error.value = 'Выберите локацию'
+                return
+            }
+            const locationPayload = mapLocationIdToApi(selectedLocationId.value)
+
+            let resolvedMainIndex = null
+            let uploadFiles = []
             if (images.value.length > 0) {
                 const uploadItems = images.value.filter(i => !i.tooMany)
 
-                // Choose main index only among uploaded images.
-                let mainIndex = uploadItems.findIndex(i => i.isMain)
-                if (mainIndex < 0 && uploadItems.length) {
-                    // If main is in the overflow part, fallback to the first uploaded.
+                const mainIndex = uploadItems.findIndex(i => i.isMain)
+                if (mainIndex > 0) {
+                    const [mainItem] = uploadItems.splice(mainIndex, 1)
+                    uploadItems.unshift(mainItem)
+                } else if (mainIndex < 0 && uploadItems.length) {
                     uploadItems[0].isMain = true
-                    mainIndex = 0
                 }
 
-                if (mainIndex >= 0) {
-                    form.append('mainImageIndex', mainIndex)
-                }
-
-                uploadItems.forEach(i => {
-                    if (i.file) {
-                        form.append('files', i.file)
-                    }
-                })
+                resolvedMainIndex = uploadItems.findIndex(i => i.isMain)
+                uploadFiles = uploadItems.map(i => i.file).filter(Boolean)
             }
 
-            const created = await adsStore.createAdWithImages(form)
+            const created = await adsStore.createAd({
+                title: title.value,
+                description: description.value,
+                price: price.value,
+                isNegotiable: isNegotiable.value,
+                categoryId: categoryId.value,
+                locationId: locationPayload.locationId,
+                listingType: type.value,
+                mainImageIndex: resolvedMainIndex >= 0 ? resolvedMainIndex : null,
+                files: uploadFiles,
+            })
 
             // API sometimes returns string `'undefined'` or `'null'`; normalize.
-            const rawId = created?.id ?? created?.adId
+            const rawId = created?.adId ?? created?.id
             const normalizedId = rawId == null ? null : String(rawId).trim()
             const numericId = Number(normalizedId)
 
@@ -240,150 +228,260 @@
 </script>
 
 <template>
-    <div class="container">
-        <div class="row justify-content-center">
-            <div class="col-md-8">
-                <h1 class="mb-4">Создать объявление</h1>
-                <div v-if="error" class="alert alert-danger">{{ error }}</div>
-                <form @submit.prevent="handleCreate">
-                    <div class="mb-3">
-                        <label class="form-label">Заголовок *</label>
-                        <input v-model="title" type="text" class="form-control" required />
-                    </div>
+    <div class="container py-4 py-lg-5">
+        <div class="mx-auto" style="max-width: 1120px;">
+            <div class="rounded-5 border bg-body-tertiary shadow-lg overflow-hidden">
+                <div class="border-bottom px-4 px-lg-5 py-4 py-lg-5">
+                    <div class="d-flex flex-column flex-lg-row justify-content-between align-items-start gap-4">
+                        <div class="flex-grow-1">
+                            <div class="small text-uppercase text-secondary fw-semibold mb-2">Создание объявления</div>
+                            <h1 class="display-6 fw-semibold mb-2">Создать объявление</h1>
+                            <p class="text-secondary mb-0 fs-5">
+                                Заполните базовые поля, локацию, тип и фотографии в одном аккуратном экране.
+                            </p>
+                        </div>
 
-                    <div class="mb-3">
-                        <label class="form-label">Описание</label>
-                        <textarea v-model="description" class="form-control" rows="4"></textarea>
-                    </div>
-
-                    <div class="row mb-3">
-                        <div class="col-md-6">
-                            <label class="form-label">Цена (бел. руб.)</label>
-                            <input v-model="price" type="number" class="form-control" />
-                            <div class="form-check mt-2">
-                                <input class="form-check-input" type="checkbox" v-model="isNegotiable" id="negotiableCheckbox" />
-                                <label class="form-check-label" for="negotiableCheckbox">Договорная цена</label>
+                        <div class="text-lg-end">
+                            <div class="mt-3 d-inline-flex flex-wrap gap-2 justify-content-lg-end">
+                                <span class="badge rounded-pill text-bg-light border text-secondary px-3 py-2">
+                                    {{ images.length }} / {{ MAX_IMAGES }} фото
+                                </span>
+                                <span class="badge rounded-pill text-bg-light border text-secondary px-3 py-2">
+                                    Порядок можно менять
+                                </span>
                             </div>
                         </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Категория *</label>
-                            <select v-model="categoryId" class="form-select" required>
-                                <option value="" disabled>Выберите категорию</option>
-                                <option v-for="cat in categoriesStore.categories" :key="cat.id" :value="cat.id">
-                                    {{ cat.name }}
-                                </option>
-                            </select>
-                        </div>
                     </div>
+                </div>
 
-                    <div class="row mb-3">
-                        <div class="col-md-6">
-                            <label class="form-label">Местоположение</label>
-                            <LocationAutocomplete
-                                :selected="selectedLocation ? [selectedLocation] : []"
-                                placeholder="Начните вводить город, область или район"
-                                @select="onLocationSelect"
-                            />
-                            <div v-if="selectedLocation" class="d-flex flex-wrap align-items-center gap-2 mt-2">
-                                <span class="badge text-bg-secondary">{{ selectedLocation.label || selectedLocation.name || `${selectedLocation.type}:${selectedLocation.id}` }}</span>
-                                <span v-if="selectedLocation.subtitle" class="small text-secondary">{{ selectedLocation.subtitle }}</span>
-                                <button type="button" class="btn btn-sm btn-outline-secondary" @click="clearSelectedLocation">Очистить</button>
-                            </div>
-                        </div>
-                        <div class="col-md-6">
-                            <label class="form-label">Тип</label>
-                            <select v-model="type" class="form-select">
-                                <option value="" disabled>Выберите тип</option>
-                                <option value="sell">Продажа</option>
-                                <option value="buy">Покупка</option>
-                                <option value="service">Услуга</option>
-                            </select>
-                        </div>
-                    </div>
+                <div class="px-4 px-lg-5 py-4 py-lg-5">
+                    <div v-if="createDisabledReason" class="alert alert-warning rounded-4 border-0 shadow-sm">{{ createDisabledReason }}</div>
+                    <div v-if="error" class="alert alert-danger rounded-4 border-0 shadow-sm">{{ error }}</div>
 
-                    <div class="mb-3">
-                        <label class="form-label">Изображения</label>
-                        <input
-                            ref="fileInputRef"
-                            type="file"
-                            class="form-control"
-                            multiple
-                            accept="image/*"
-                            @change="onFilesSelected"
-                        />
-                        <small class="form-text text-muted">
-                            Всего можно загрузить до {{ MAX_IMAGES }} изображений. Сейчас: {{ images.length }}.
-                        </small>
-                    </div>
-
-                    <div v-if="images.length" class="mb-3">
-                        <div class="d-flex justify-content-between mb-1">
-                            <div>
-                                <strong>Превью изображений</strong>
-                                <div class="text-muted small">Перетащите для изменения порядка. Только первые {{ MAX_IMAGES }} будут загружены.</div>
-                            </div>
-                            <div class="text-muted small">Нажмите ✕, чтобы удалить.</div>
-                        </div>
-
-                        <div ref="imagesListRef" class="row">
-                            <div
-                                class="col-3 mb-2 position-relative"
-                                v-for="item in images"
-                                :key="item.localId"
-                            >
-                                <img
-                                    :src="getPreviewUrl(item)"
-                                    class="img-fluid border"
-                                    :class="{ 'border-danger': item.tooMany }"
-                                    style="max-height:100px" />
-
-                                <button
-                                    type="button"
-                                    class="btn-close position-absolute top-0 end-0"
-                                    aria-label="Удалить"
-                                    @click="removeImage(item)"
-                                ></button>
-
-                                <div class="form-check position-absolute top-0 start-0 bg-light p-1">
-                                    <input
-                                        class="form-check-input"
-                                        type="radio"
-                                        name="mainImage"
-                                        :checked="item.isMain"
-                                        @change="() => setMainImage(item)"
-                                        :disabled="item.tooMany"
-                                    />
-                                    <label class="form-check-label small">Главное</label>
+                    <form @submit.prevent="handleCreate" class="d-grid gap-4">
+                        <section class="card border-0 shadow-sm rounded-4">
+                            <div class="card-body p-4 p-lg-5">
+                                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+                                    <div>
+                                        <div class="small text-uppercase text-secondary fw-semibold mb-1">Основное</div>
+                                        <div class="text-secondary small">Базовые поля, которые видны в карточке объявления.</div>
+                                    </div>
                                 </div>
 
-                                <div
-                                    class="badge position-absolute bottom-0 start-0 m-1"
-                                    :class="item.tooMany ? 'bg-danger' : 'bg-secondary'"
-                                >
-                                    {{ item.tooMany ? 'Не будет загружено' : (item.isNew ? 'Новое' : 'С сервера') }}
+                                <div class="mb-3">
+                                    <label class="form-label">Заголовок *</label>
+                                    <input v-model="title" type="text" class="form-control form-control-lg rounded-3" required />
+                                </div>
+
+                                <div class="mb-3">
+                                    <label class="form-label">Описание</label>
+                                    <textarea v-model="description" class="form-control rounded-3" rows="5"></textarea>
+                                </div>
+
+                                <div class="row g-3 align-items-start">
+                                    <div class="col-md-6">
+                                        <label class="form-label">Цена (бел. руб.)</label>
+                                        <input v-model="price" type="number" class="form-control rounded-3" />
+                                        <div class="form-check mt-2">
+                                            <input class="form-check-input" type="checkbox" v-model="isNegotiable" id="negotiableCheckbox" />
+                                            <label class="form-check-label" for="negotiableCheckbox">Договорная цена</label>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-md-6">
+                                        <label class="form-label">Категория *</label>
+                                        <select v-model="categoryId" class="form-select rounded-3" required>
+                                            <option value="" disabled>Выберите категорию</option>
+                                            <option v-for="cat in categoriesStore.categories" :key="cat.id" :value="cat.id">
+                                                {{ cat.name }}
+                                            </option>
+                                        </select>
+                                    </div>
                                 </div>
                             </div>
-                        </div>
-                    </div>
+                        </section>
 
-                    <button type="submit" class="btn btn-primary">Создать</button>
-                </form>
+                        <section class="card border-0 shadow-sm rounded-4">
+                            <div class="card-body p-4 p-lg-5">
+                                <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-4">
+                                    <div>
+                                        <div class="small text-uppercase text-secondary fw-semibold mb-1">Локация и тип</div>
+                                        <div class="text-secondary small">Выберите местоположение и тип объявления.</div>
+                                    </div>
+                                </div>
+
+                                <div class="row g-4 align-items-start">
+                                    <div class="col-lg-7">
+                                        <label class="form-label">Местоположение</label>
+                                        <div class="bg-body-tertiary border rounded-4 p-3 p-lg-4 shadow-sm">
+                                            <LocationCascade v-model="selectedLocationId" />
+                                        </div>
+                                    </div>
+
+                                    <div class="col-lg-5">
+                                        <label class="form-label">Тип</label>
+                                        <select v-model="type" class="form-select rounded-3">
+                                            <option value="" disabled>Выберите тип</option>
+                                            <option value="sell">Продажа</option>
+                                            <option value="buy">Покупка</option>
+                                            <option value="service">Услуга</option>
+                                        </select>
+
+                                        <div class="mt-3 p-3 rounded-4 bg-white border shadow-sm">
+                                            <div class="fw-semibold mb-1">Подсказка</div>
+                                            <div class="small text-secondary mb-0">
+                                                Проверьте локацию и тип перед отправкой. После создания объявление уйдёт на модерацию.
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                        </section>
+
+                        <section class="card border-0 shadow-sm rounded-4">
+                            <div class="card-body p-4 p-lg-5">
+                                <div class="d-flex justify-content-between align-items-start mb-3">
+                                    <div>
+                                        <div class="small text-uppercase text-secondary fw-semibold mb-1">Изображения</div>
+                                        <div class="text-secondary small">Добавляйте фото, меняйте порядок и выбирайте главное.</div>
+                                    </div>
+
+                                    <div class="small text-secondary">
+                                        Загружено {{ images.length }} из {{ MAX_IMAGES }}
+                                    </div>
+                                </div>
+
+                                <div v-if="!images.length" class="border rounded-4 bg-body-tertiary text-center p-5 mb-3">
+                                    <label style="cursor:pointer;">
+                                        <input
+                                            ref="fileInputRef"
+                                            type="file"
+                                            class="d-none"
+                                            multiple
+                                            accept="image/*"
+                                            @change="onFilesSelected"
+                                        />
+
+                                        <div class="mb-2" style="font-size: 32px;">📷</div>
+
+                                        <div class="fw-semibold mb-1">
+                                            Выберите или перетащите фотографии
+                                        </div>
+
+                                        <div class="small text-secondary mb-2">
+                                            JPEG, JPG, PNG. Можно загрузить до {{ MAX_IMAGES }} файлов.
+                                        </div>
+
+                                        <div class="btn btn-light border">
+                                            Добавить фотографии
+                                        </div>
+                                    </label>
+                                </div>
+
+                                <div v-else ref="imagesListRef" class="row g-3">
+                                    <div
+                                        v-for="item in images"
+                                        :key="item.localId"
+                                        class="col-6 col-md-4 col-xl-3 image-item"
+                                    >
+                                        <div
+                                            class="card h-100 border rounded-4 overflow-hidden position-relative"
+                                            :class="[
+                                                item.tooMany ? 'opacity-50' : '',
+                                                item.isMain ? 'border-primary border-3' : 'border-light'
+                                            ]"
+                                            @click="!item.tooMany && setMainImage(item)"
+                                            style="cursor: pointer;"
+                                        >
+                                            <div class="ratio ratio-1x1 bg-light">
+                                                <img
+                                                    :src="getPreviewUrl(item)"
+                                                    class="w-100 h-100"
+                                                    style="object-fit: cover;"
+                                                    :alt="item.file?.name || 'Изображение объявления'"
+                                                />
+                                            </div>
+
+                                            <div
+                                                v-if="item.isMain"
+                                                class="position-absolute top-0 start-0 m-2 px-2 py-1 rounded-pill bg-primary text-white d-flex align-items-center gap-1"
+                                                style="font-size: 12px;"
+                                            >
+                                                <span>📌</span>
+                                                <span>Главная</span>
+                                            </div>
+
+                                            <button
+                                                class="btn btn-sm btn-light rounded-circle position-absolute top-0 end-0 m-2 shadow-sm"
+                                                style="width: 28px; height: 28px;"
+                                                @click.stop="removeImage(item)"
+                                                type="button"
+                                            >
+                                                ✕
+                                            </button>
+
+                                            <div class="position-absolute bottom-0 start-0 p-2">
+                                                <span
+                                                    class="badge rounded-pill"
+                                                    :class="item.tooMany ? 'bg-danger' : 'bg-success'"
+                                                >
+                                                    {{ item.tooMany ? 'Не загрузится' : 'Новое' }}
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    <div class="col-6 col-md-4 col-xl-3">
+                                        <label class="card h-100 border rounded-4 d-flex align-items-center justify-content-center text-muted" style="cursor:pointer;">
+                                            <input
+                                                ref="fileInputRef"
+                                                type="file"
+                                                class="d-none"
+                                                multiple
+                                                accept="image/*"
+                                                @change="onFilesSelected"
+                                            />
+
+                                            <div class="text-center">
+                                                <div style="font-size: 28px;">＋</div>
+                                                <div class="small">Добавить</div>
+                                            </div>
+                                        </label>
+                                    </div>
+                                </div>
+
+                                <div class="small text-secondary mt-3 d-flex align-items-start gap-2">
+                                    <span>⚡</span>
+                                    <span>
+                                        Качественные фотографии увеличивают шансы на отклик. Перетащите карточки, чтобы изменить порядок.
+                                    </span>
+                                </div>
+                            </div>
+                        </section>
+
+                        <div class="d-flex justify-content-end">
+                            <button type="submit" class="btn btn-primary btn-lg rounded-pill px-4 px-lg-5" :disabled="Boolean(createDisabledReason)">
+                                Создать объявление
+                            </button>
+                        </div>
+                    </form>
+                </div>
             </div>
         </div>
     </div>
 </template>
 
 <style scoped>
-    .sortable-ghost {
-        opacity: 0.6;
-        transform: scale(0.98);
-    }
+.sortable-ghost {
+    opacity: 0.6;
+    transform: scale(0.98);
+}
 
-    .sortable-chosen {
-        opacity: 0.8;
-    }
+.sortable-chosen {
+    opacity: 0.8;
+}
 
-    [draggable="true"] {
-        user-select: none;
-    }
+[draggable="true"] {
+    user-select: none;
+}
 </style>
