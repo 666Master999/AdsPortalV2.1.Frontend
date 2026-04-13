@@ -26,12 +26,12 @@ export function getFieldErrors(value) {
 
 export const notificationRenderers = {
   AdApproved(entry) {
-    const actorName = toText(entry?.data?.actorName)
+    const actorName = toText(entry?.actorName ?? entry?.data?.actorName)
 
     return {
       title: 'Объявление одобрено',
-      subtitle: toText(entry?.preview?.title),
-      image: resolveMediaUrl(entry?.preview?.mainImagePath),
+      subtitle: toText(entry?.adTitle ?? entry?.preview?.title),
+      image: resolveMediaUrl(entry?.mainImagePath ?? entry?.preview?.mainImagePath),
       meta: actorName ? `Модератор: ${actorName}` : '',
       details: [],
       actionLabel: '',
@@ -42,16 +42,16 @@ export const notificationRenderers = {
   },
 
   AdRejected(entry) {
-    const actorName = toText(entry?.data?.actorName)
-    const reason = toText(entry?.data?.reason ?? entry?.reason)
+    const actorName = toText(entry?.actorName ?? entry?.data?.actorName)
+    const reason = toText(entry?.reason ?? entry?.data?.reason ?? '')
     const meta = [actorName ? `Модератор: ${actorName}` : '', reason ? `Причина: ${reason}` : '']
       .filter(Boolean)
       .join(' · ')
 
     return {
       title: 'Объявление отклонено',
-      subtitle: toText(entry?.preview?.title),
-      image: resolveMediaUrl(entry?.preview?.mainImagePath),
+      subtitle: toText(entry?.adTitle ?? entry?.preview?.title),
+      image: resolveMediaUrl(entry?.mainImagePath ?? entry?.preview?.mainImagePath),
       meta,
       details: getFieldErrors(entry?.data?.fieldErrors),
       actionLabel: entry?.adId == null ? '' : 'Исправить',
@@ -78,8 +78,8 @@ export const notificationRenderers = {
   __default(entry) {
     return {
       title: 'Уведомление',
-      subtitle: toText(entry?.preview?.title),
-      image: resolveMediaUrl(entry?.preview?.mainImagePath),
+      subtitle: toText(entry?.adTitle ?? entry?.preview?.title),
+      image: resolveMediaUrl(entry?.mainImagePath ?? entry?.preview?.mainImagePath),
       meta: entry?.type ? `Тип: ${entry.type}` : '',
       details: [],
       actionLabel: '',

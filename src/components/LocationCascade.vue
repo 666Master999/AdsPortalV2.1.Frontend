@@ -130,8 +130,8 @@ onMounted(() => {
       {{ loadError }}
     </div>
 
-    <div class="row g-3">
-      <div class="col-12 col-md-4">
+    <div class="location-stack">
+      <div>
         <label class="form-label small text-secondary fw-semibold">Область</label>
         <select
           class="form-select rounded-3"
@@ -146,35 +146,39 @@ onMounted(() => {
         </select>
       </div>
 
-      <div v-if="regionId != null" class="col-12 col-md-4">
-        <label class="form-label small text-secondary fw-semibold">Город</label>
-        <select
-          class="form-select rounded-3"
-          :disabled="disabled || isLoading"
-          :value="cityId ?? ''"
-          @change="onCityChange"
-        >
-          <option value="">Выберите город</option>
-          <option v-for="city in currentCities" :key="city.id" :value="city.id">
-            {{ city.name }}
-          </option>
-        </select>
-      </div>
+      <transition name="loc-slide" appear>
+        <div v-if="regionId != null" class="mt-2">
+          <label class="form-label small text-secondary fw-semibold">Город</label>
+          <select
+            class="form-select rounded-3"
+            :disabled="disabled || isLoading"
+            :value="cityId ?? ''"
+            @change="onCityChange"
+          >
+            <option value="">Выберите город</option>
+            <option v-for="city in currentCities" :key="city.id" :value="city.id">
+              {{ city.name }}
+            </option>
+          </select>
+        </div>
+      </transition>
 
-      <div v-if="cityId != null && currentDistricts.length" class="col-12 col-md-4">
-        <label class="form-label small text-secondary fw-semibold">Район</label>
-        <select
-          class="form-select rounded-3"
-          :disabled="disabled || isLoading"
-          :value="districtId ?? ''"
-          @change="onDistrictChange"
-        >
-          <option value="">Выберите район</option>
-          <option v-for="district in currentDistricts" :key="district.id" :value="district.id">
-            {{ district.name }}
-          </option>
-        </select>
-      </div>
+      <transition name="loc-slide" appear>
+        <div v-if="cityId != null && currentDistricts.length" class="mt-2">
+          <label class="form-label small text-secondary fw-semibold">Район</label>
+          <select
+            class="form-select rounded-3"
+            :disabled="disabled || isLoading"
+            :value="districtId ?? ''"
+            @change="onDistrictChange"
+          >
+            <option value="">Выберите район</option>
+            <option v-for="district in currentDistricts" :key="district.id" :value="district.id">
+              {{ district.name }}
+            </option>
+          </select>
+        </div>
+      </transition>
     </div>
 
     <div v-if="isLoading" class="small text-secondary">Загрузка локаций...</div>
@@ -189,3 +193,20 @@ onMounted(() => {
     </div>
   </div>
 </template>
+
+<style scoped>
+.loc-slide-enter-active,
+.loc-slide-leave-active {
+  transition: opacity .18s ease, transform .18s ease;
+}
+.loc-slide-enter-from,
+.loc-slide-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+.loc-slide-enter-to,
+.loc-slide-leave-from {
+  opacity: 1;
+  transform: translateY(0);
+}
+</style>

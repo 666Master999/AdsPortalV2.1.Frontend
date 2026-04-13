@@ -6,6 +6,7 @@ import { useChatStore } from '../stores/chatStore'
 import { useNotificationsStore } from '../stores/notificationsStore'
 import { useAccessService } from '../services/accessService'
 import NotificationItem from './notifications/NotificationItem.vue'
+import { notificationRenderers } from '../services/notificationRenderers'
 import { useGroupedNotifications } from '../composables/useGroupedNotifications'
 
 const userStore = useUserStore()
@@ -33,6 +34,22 @@ const openedGroup = ref(null)
 
 function toggleGroup(id) {
   openedGroup.value = openedGroup.value === id ? null : id
+}
+
+function groupBubbleClass(entry) {
+  const first = Array.isArray(entry?.items) && entry.items.length ? entry.items[0] : null
+  const renderer = notificationRenderers[first?.type] || notificationRenderers.__default
+  const base = renderer(first || {})
+  const variant = base.variant || 'default'
+  const hasUnread = Array.isArray(entry?.items) ? entry.items.some(i => !i.isRead) : false
+
+  const background = hasUnread
+    ? variant === 'success' ? 'bg-success-subtle' : variant === 'danger' ? 'bg-danger-subtle' : 'bg-primary-subtle'
+    : 'bg-body'
+
+  const border = variant === 'success' ? 'border-success-subtle' : variant === 'danger' ? 'border-danger-subtle' : 'border-primary-subtle'
+
+  return `${background} ${border}`
 }
 
 function closeDropdown() {
@@ -177,32 +194,63 @@ async function handleLogout() {
 
                 <div v-else class="overflow-y-auto p-2 d-grid gap-2" :style="uiStyles.notificationsList">
                   <div v-for="entry in groupedEntries" :key="entry.key">
-                    <div v-if="entry.type === 'group'" class="accordion accordion-flush mb-2">
-                      <div class="accordion-item border-0">
-                        <h2 class="accordion-header">
-                          <button
-                            class="accordion-button p-0 bg-transparent shadow-none d-flex align-items-center gap-2 w-100"
-                            :class="openedGroup === entry.key ? '' : 'collapsed'"
-                            type="button"
-                            @click.stop="toggleGroup(entry.key)"
-                            :aria-expanded="openedGroup === entry.key"
-                          >
-                            <NotificationItem class="flex-grow-1" :entry="entry.items[0]" :compact="true" />
-                            <span class="badge bg-secondary ms-2">{{ entry.items.length }}</span>
-                          </button>
-                        </h2>
-
-                        <div v-show="openedGroup === entry.key" class="p-2 ps-2 position-relative overflow-hidden" style="min-height:0;">
-                          <div class="d-grid gap-2">
+                    <div v-if="entry.type === 'group'" class="mb-2">
+                      <div
+                        class="rounded-4 border overflow-hidden"
+                        :class="groupBubbleClass(entry)"
+                      >
+                        <div
+                          class="d-flex align-items-center gap-2 p-2 w-100 user-select-none"
+                          role="button"
+                          tabindex="0"
+                          @click.stop="toggleGroup(entry.key)"
+                          @keydown.enter.stop.prevent="toggleGroup(entry.key)"
+                          :aria-expanded="openedGroup === entry.key"
+                        >
+                          <div class="flex-grow-1 min-w-0">
                             <NotificationItem
-                              v-for="item in entry.items"
-                              :key="item.id"
-                              :entry="item"
-                              @open="() => openNotification(item)"
-                              @edit="() => editNotification(item)"
+                              class="w-100"
+                              :entry="entry.items[0]"
+                              :compact="true"
+                              :group-count="entry.items.length"
+                              :group-has-unread="entry.items.some(i => !i.isRead)"
+                              :inside-group="true"
                             />
                           </div>
+                          <div class="flex-shrink-0 ms-2 d-flex align-items-center">
+                            <svg
+                              xmlns="http://www.w3.org/2000/svg"
+                              width="18"
+                              height="18"
+                              fill="currentColor"
+                              viewBox="0 0 16 16"
+                              :style="{ transform: openedGroup === entry.key ? 'rotate(180deg)' : 'rotate(0deg)', transition: 'transform .18s ease', transformOrigin: 'center' }"
+                            >
+                              <path fill-rule="evenodd" d="M1.646 4.146a.5.5 0 0 1 .708 0L8 9.793l5.646-5.647a.5.5 0 0 1 .708.708L8 10.207 2.354 4.854a.5.5 0 0 1-.708-.708z"/>
+                            </svg>
+                          </div>
                         </div>
+
+                        <transition
+                          enter-active-class="fade"
+                          enter-from-class=""
+                          enter-to-class="show"
+                          leave-active-class="fade"
+                          leave-from-class="show"
+                          leave-to-class=""
+                        >
+                          <div v-show="openedGroup === entry.key" class="p-2 ps-2 position-relative overflow-hidden" style="min-height:0;">
+                            <div class="d-grid gap-2">
+                              <NotificationItem
+                                v-for="item in entry.items"
+                                :key="item.id"
+                                :entry="item"
+                                @open="() => openNotification(item)"
+                                @edit="() => editNotification(item)"
+                              />
+                            </div>
+                          </div>
+                        </transition>
                       </div>
                     </div>
 

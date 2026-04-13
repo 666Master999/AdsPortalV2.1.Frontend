@@ -4892,10 +4892,6 @@ export interface components {
             userLogin?: string | null;
             mainImagePath?: string | null;
         };
-        NotificationDataDto: {
-            actorName?: string;
-            reason?: string | null;
-        };
         NotificationDto: {
             /** Format: int32 */
             id?: number;
@@ -4904,12 +4900,11 @@ export interface components {
             /** Format: date-time */
             createdAt?: string;
             reason?: string | null;
-            preview?: components["schemas"]["NotificationPreviewDto"];
-            data?: components["schemas"]["NotificationDataDto"];
-        };
-        NotificationPreviewDto: {
-            title?: string;
+            /** Format: int32 */
+            adId?: number | null;
+            adTitle?: string | null;
             mainImagePath?: string | null;
+            actorName?: string | null;
         };
         NotificationsResultDto: {
             items?: components["schemas"]["NotificationDto"][];

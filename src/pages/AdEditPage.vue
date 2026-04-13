@@ -1,5 +1,5 @@
 <script setup>
-import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, nextTick, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import Sortable from 'sortablejs'
 import { useAdsStore } from '../stores/adsStore'
@@ -23,11 +23,16 @@ function getImageUrl(path) {
 }
 
 const MAX_IMAGES = 10
+const DESCRIPTION_MAX = 5000
 
 // ---- Формы ----
 const title = ref('')
 const description = ref('')
 const price = ref('')
+const titleRef = ref(null)
+const priceRef = ref(null)
+const movedPastPrice = ref(false)
+const attemptedSubmit = ref(false)
 const isNegotiable = ref(false)
 const categoryId = ref('')
 const selectedLocationId = ref(null)
@@ -44,6 +49,46 @@ const editDisabledReason = computed(() => {
     return createBlockedReason.replace('Создание', 'Редактирование')
   }
   return 'Редактирование объявлений ограничено (PostBan).'
+})
+
+const titleError = computed(() => {
+  const t = String(title.value || '')
+  if (!t.trim()) {
+    if (!attemptedSubmit.value) return ''
+    return 'Заголовок обязателен'
+  }
+  if (t.length > 200) return 'Заголовок не может быть длиннее 200 символов'
+  return ''
+})
+
+const priceError = computed(() => {
+  const rawPrice = price.value
+  if (rawPrice === '' || rawPrice == null) return ''
+  const p = Number(String(rawPrice).trim())
+  if (!Number.isFinite(p)) return 'Цена должна быть числом'
+  if (p < 0 || p > 999999999) return 'Цена должна быть от 0 до 999999999'
+  return ''
+})
+
+const priceEmptyWarning = computed(() => {
+  return movedPastPrice.value && (price.value === '' || price.value == null) && !priceError.value
+})
+
+function focusFirstInvalid() {
+  if (titleError.value) {
+    titleRef.value?.focus?.()
+    return
+  }
+  if (priceError.value) {
+    priceRef.value?.focus?.()
+    return
+  }
+}
+
+watch(title, () => {
+  if (attemptedSubmit.value) {
+    attemptedSubmit.value = false
+  }
 })
 
 const moderationStatus = computed(() => {
@@ -263,6 +308,15 @@ async function handleUpdate() {
       return
     }
 
+    // Mark that the user attempted to submit so required-only errors show
+    attemptedSubmit.value = true
+
+    // Prevent submit if inline validation errors exist
+    if (titleError.value || priceError.value) {
+      focusFirstInvalid()
+      return
+    }
+
     const items = images.value
 
     // 1) Загружаем новые файлы, получаем их filePath
@@ -327,7 +381,8 @@ async function handleUpdate() {
     if (title.value !== initialAd.value.title) payload.title = title.value
     if (description.value !== initialAd.value.description) payload.description = description.value
     if (isNegotiable.value !== Boolean(initialAd.value.isNegotiable)) payload.isNegotiable = isNegotiable.value
-    if (price.value !== initialAd.value.price) payload.price = price.value
+    const normalizedPrice = (price.value === '' || price.value == null) ? null : Number(String(price.value).trim())
+    if (String(normalizedPrice ?? '') !== String(initialAd.value.price ?? '')) payload.price = normalizedPrice
     if (categoryId.value !== initialAd.value.categoryId) payload.categoryId = categoryId.value
     if (selectedLocationId.value == null) {
       error.value = 'Выберите локацию'
@@ -375,6 +430,7 @@ async function handleUpdate() {
     if (Array.isArray(finalResult?.errors) && finalResult.errors.length) query.errors = serializePatchIssues(finalResult.errors)
     if (!Object.keys(query).length) query.message = 'Объявление обновлено'
 
+    attemptedSubmit.value = false
     router.push({ path: `/ads/${route.params.id}`, query })
   } catch (e) {
     console.error('Error during ad update:', e)
@@ -490,18 +546,27 @@ onBeforeUnmount(() => {
 
                 <div class="mb-3">
                   <label class="form-label">Заголовок *</label>
-                  <input v-model="title" type="text" class="form-control form-control-lg rounded-3" required />
+                  <input ref="titleRef" v-model="title" type="text" maxlength="200" class="form-control form-control-lg rounded-3" :class="{ 'is-invalid': titleError }" required />
+                  <div v-if="titleError" class="invalid-feedback d-block">{{ titleError }}</div>
                 </div>
 
                 <div class="mb-3">
-                  <label class="form-label">Описание</label>
+                  <label class="form-label d-flex justify-content-between align-items-center">
+                    <span>Описание</span>
+                    <small>
+                      <span :class="description.length > DESCRIPTION_MAX ? 'text-danger fw-semibold' : 'text-secondary'">{{ description.length || 0 }}</span>
+                      <span class="text-secondary"> / {{ DESCRIPTION_MAX }}</span>
+                    </small>
+                  </label>
                   <textarea v-model="description" class="form-control rounded-3" rows="5"></textarea>
                 </div>
 
                 <div class="row g-3 align-items-start">
                   <div class="col-md-6">
                     <label class="form-label">Цена (бел. руб.)</label>
-                    <input v-model="price" type="number" class="form-control rounded-3" />
+                    <input ref="priceRef" v-model="price" type="number" class="form-control rounded-3" :class="{ 'is-invalid': priceError }" />
+                    <div v-if="priceError" class="invalid-feedback d-block">{{ priceError }}</div>
+                    <div v-else-if="priceEmptyWarning" class="form-text text-warning">Оставив поле цены пустым, объявление будет помечено как «Бесплатно».</div>
                     <div class="form-check mt-2">
                       <input class="form-check-input" type="checkbox" v-model="isNegotiable" id="negotiableCheckbox" />
                       <label class="form-check-label" for="negotiableCheckbox">Договорная цена</label>
@@ -509,7 +574,7 @@ onBeforeUnmount(() => {
                   </div>
                   <div class="col-md-6">
                     <label class="form-label">Категория *</label>
-                    <select v-model="categoryId" class="form-select rounded-3" required>
+                                        <select v-model="categoryId" class="form-select rounded-3" required @focus="movedPastPrice = true">
                       <option value="" disabled>Выберите категорию</option>
                       <option v-for="cat in categoriesStore.categories" :key="cat.id" :value="cat.id">
                         {{ cat.name }}
@@ -532,14 +597,14 @@ onBeforeUnmount(() => {
                 <div class="row g-4 align-items-start">
                   <div class="col-lg-7">
                     <label class="form-label">Местоположение</label>
-                    <div class="bg-body-tertiary border rounded-4 p-3 p-lg-4 shadow-sm">
+                    <div class="bg-body-tertiary border rounded-4 p-3 p-lg-4 shadow-sm" @focusin="movedPastPrice = true">
                       <LocationCascade v-model="selectedLocationId" />
                     </div>
                   </div>
 
                   <div class="col-lg-5">
                     <label class="form-label">Тип</label>
-                    <select v-model="type" class="form-select rounded-3">
+                    <select v-model="type" class="form-select rounded-3" @focus="movedPastPrice = true">
                       <option value="" disabled>Выберите тип</option>
                       <option value="sell">Продажа</option>
                       <option value="buy">Покупка</option>
@@ -677,9 +742,14 @@ onBeforeUnmount(() => {
             @change="onFilesSelected"
           />
 
-          <div class="text-center">
-            <div style="font-size: 28px;">＋</div>
-            <div class="small">Добавить</div>
+          <div class="ratio ratio-1x1 bg-light d-flex align-items-center justify-content-center w-100">
+            <div class="ratio ratio-1x1 bg-light w-100 position-relative">
+              <div class="position-absolute top-50 start-50 translate-middle d-flex flex-column align-items-center justify-content-center text-center">
+                <div style="font-size: 28px; line-height: 1;">＋</div>
+                <div class="small">Добавить</div>
+              </div>
+            </div>
+
           </div>
         </label>
       </div>
@@ -697,7 +767,7 @@ onBeforeUnmount(() => {
 </section>
 
             <div class="d-flex justify-content-end">
-              <button type="submit" class="btn btn-primary btn-lg rounded-pill px-4 px-lg-5" :disabled="Boolean(editDisabledReason)">
+              <button type="submit" class="btn btn-primary btn-lg rounded-pill px-4 px-lg-5" :disabled="Boolean(editDisabledReason) || Boolean(titleError) || Boolean(priceError)">
                 Сохранить изменения
               </button>
             </div>

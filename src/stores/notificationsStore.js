@@ -52,6 +52,9 @@ export const useNotificationsStore = defineStore('notifications', () => {
       data,
       adId,
       reason: item.reason ?? item.data?.reason ?? null,
+      adTitle: item.adTitle ?? preview?.title ?? item.data?.adTitle ?? null,
+      mainImagePath: item.mainImagePath ?? preview?.mainImagePath ?? null,
+      actorName: item.actorName ?? item.data?.actorName ?? null,
     }
   }
 

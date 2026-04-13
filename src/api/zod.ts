@@ -517,12 +517,7 @@ const LocationTreeNodeDto: z.ZodType<LocationTreeNodeDto> = z.lazy(() =>
     })
     .partial()
 );
-const NotificationPreviewDto = z
-  .object({ title: z.string(), mainImagePath: z.string().nullable() })
-  .partial();
-const NotificationDataDto = z
-  .object({ actorName: z.string(), reason: z.string().nullable() })
-  .partial();
+// Notification DTO updated: server now provides adTitle, mainImagePath and actorName
 const NotificationDto = z
   .object({
     id: z.number().int(),
@@ -530,8 +525,10 @@ const NotificationDto = z
     isRead: z.boolean(),
     createdAt: z.string().datetime({ offset: true }),
     reason: z.string().nullable(),
-    preview: NotificationPreviewDto,
-    data: NotificationDataDto,
+    adId: z.number().int().nullable(),
+    adTitle: z.string().nullable(),
+    mainImagePath: z.string().nullable(),
+    actorName: z.string().nullable(),
   })
   .partial();
 const NotificationsResultDto = z
@@ -680,8 +677,6 @@ export const schemas = {
   postConversationsIdattachments_Body,
   ConversationStateDto,
   LocationTreeNodeDto,
-  NotificationPreviewDto,
-  NotificationDataDto,
   NotificationDto,
   NotificationsResultDto,
   UserAdDto,

@@ -6,6 +6,10 @@ const props = defineProps({
   entry: { type: Object, required: true },
   compact: { type: Boolean, default: false },
   hintLabel: { type: String, default: '' },
+  groupCount: { type: Number, default: 0 },
+  groupHasUnread: { type: Boolean, default: false },
+  noCard: { type: Boolean, default: false },
+  insideGroup: { type: Boolean, default: false },
 })
 
 const emit = defineEmits(['open', 'edit'])
@@ -16,11 +20,27 @@ const isFocused = ref(false)
 
 const uiStyles = {
   image: { width: '4.5rem', height: '4.5rem' },
+  imageCompact: { width: '40px', height: '40px' },
   interactiveRoot: { cursor: 'pointer', transition: 'box-shadow .15s ease, background-color .15s ease' },
 }
 
+const imageStyle = computed(() => (props.compact ? uiStyles.imageCompact : uiStyles.image))
+
+const titleClampStyle = computed(() => props.compact ? {
+  display: '-webkit-box',
+  WebkitLineClamp: 2,
+  WebkitBoxOrient: 'vertical',
+  overflow: 'hidden',
+  textOverflow: 'ellipsis',
+  lineHeight: '1.15em',
+  maxHeight: '2.3em',
+} : {})
+
+const isGroup = computed(() => Number(props.groupCount) > 1)
+const isReadComputed = computed(() => isGroup.value ? !props.groupHasUnread : Boolean(config.value.isRead))
+
 const cardClass = computed(() => {
-  const isRead = Boolean(config.value.isRead)
+  const isRead = Boolean(isReadComputed.value)
   const variant = config.value.variant || 'default'
 
   const background = isRead
@@ -46,7 +66,8 @@ const cardClass = computed(() => {
   ].filter(Boolean).join(' ')
 })
 
-const isRaised = computed(() => !props.compact && (isHovered.value || isFocused.value))
+const isRaised = computed(() => (isHovered.value || isFocused.value))
+const skipCard = computed(() => Boolean(props.noCard || props.insideGroup))
 const notificationAriaLabel = computed(() => {
   if (!config.value.title) return 'Уведомление'
   if (config.value.action?.type === 'edit') return `Исправить объявление: ${config.value.title}`
@@ -82,10 +103,10 @@ export default { name: 'NotificationItem' }
 
 <template>
   <div
-    :class="[cardClass, isRaised ? 'shadow-lg' : '']"
-    :role="config.interactive ? 'button' : undefined"
-    :tabindex="config.interactive ? 0 : undefined"
-    :style="config.interactive ? uiStyles.interactiveRoot : null"
+    :class="[ skipCard ? 'w-100 p-0' : cardClass, (isRaised && !skipCard) ? 'shadow-lg' : '' ]"
+    :role="(!skipCard && config.interactive) ? 'button' : undefined"
+    :tabindex="(!skipCard && config.interactive) ? 0 : undefined"
+    :style="(!skipCard && config.interactive) ? uiStyles.interactiveRoot : null"
     :aria-label="notificationAriaLabel"
     :title="notificationAriaLabel"
     @click="openNotification"
@@ -103,19 +124,46 @@ export default { name: 'NotificationItem' }
         loading="lazy"
         decoding="async"
         @error="event => { event.target.style.display = 'none' }"
-        class="rounded-4 flex-shrink-0 object-fit-cover bg-body-secondary"
-        :style="uiStyles.image"
+        class="rounded-3 flex-shrink-0 object-fit-cover bg-body-secondary"
+        :style="imageStyle"
       />
 
       <div class="flex-grow-1 min-w-0">
-        <div class="d-flex align-items-start justify-content-between gap-3">
+        <!-- Compact header (used for grouped entries) -->
+        <div v-if="compact" class="d-flex flex-column w-100">
+          <div class="d-flex align-items-start justify-content-between w-100">
+            <div class="min-w-0 pe-2">
+              <div :class="['fw-semibold', config.titleClass]" :style="titleClampStyle">{{ config.title }}</div>
+            </div>
+            <div class="flex-shrink-0 text-end ms-2">
+              <div class="small text-secondary text-nowrap" :title="config.fullDateTitle || undefined">{{ config.formattedDate }}</div>
+            </div>
+          </div>
+
+          <div class="d-flex align-items-center justify-content-between w-100 mt-1 small text-body-secondary">
+            <div class="text-truncate d-flex align-items-center gap-2">
+              <span v-if="groupHasUnread" class="badge rounded-pill bg-primary-subtle text-primary-emphasis small">Новое</span>
+              <div class="text-truncate">
+                <span v-if="config.badgeLabel" class="me-2 text-secondary small">{{ config.badgeLabel }}</span>
+                <span v-else-if="config.subtitle" class="text-truncate">{{ config.subtitle }}</span>
+              </div>
+            </div>
+            <div class="flex-shrink-0 d-flex align-items-center gap-2 ms-2">
+              <span v-if="groupCount > 1" class="badge rounded-pill bg-secondary text-white" style="font-size:0.65rem;min-width:1.2rem;padding:0.18rem 0.42rem;">{{ groupCount }}</span>
+              <span v-if="groupHasUnread" class="d-inline-block rounded-circle bg-primary" :style="{width:'8px',height:'8px'}"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Full item layout -->
+        <div v-else class="d-flex align-items-start justify-content-between gap-3">
           <div class="min-w-0 flex-grow-1">
             <div class="d-flex align-items-center gap-2 flex-wrap">
               <div class="fw-semibold text-break" :class="config.titleClass">{{ config.title }}</div>
               <span v-if="config.badgeLabel" class="badge rounded-pill" :class="config.badgeClass">{{ config.badgeLabel }}</span>
             </div>
             <div v-if="config.subtitle" class="small text-body-secondary text-break mt-1">{{ config.subtitle }}</div>
-            <div v-if="config.meta" class="small text-secondary text-break mt-1">{{ config.meta }}</div>
+           <!-- <div v-if="config.meta" class="small text-secondary text-break mt-1">{{ config.meta }}</div> -->
           </div>
 
           <div class="d-flex flex-column align-items-end gap-1 flex-shrink-0">
@@ -124,10 +172,10 @@ export default { name: 'NotificationItem' }
           </div>
         </div>
 
-        <div v-if="!compact && config.interactive" class="mt-2 d-flex align-items-center justify-content-between gap-3 small text-secondary">
+        <!--<div v-if="!compact && config.interactive" class="mt-2 d-flex align-items-center justify-content-between gap-3 small text-secondary">
           <span>{{ hintLabel || 'Нажмите, чтобы открыть' }}</span>
           <span class="text-primary fw-semibold">↗</span>
-        </div>
+        </div>-->
       </div>
     </article>
 

@@ -1,6 +1,6 @@
 import { computed, unref } from 'vue'
 import { timeAgo } from '../utils/formatDate'
-import { notificationRenderers } from '../services/notificationRenderers'
+import { notificationRenderers, toText } from '../services/notificationRenderers'
 
 function readValue(source) {
   return typeof source === 'function'
@@ -16,9 +16,16 @@ export function useNotificationConfig(source, compactSource = false) {
     const base = renderer(entry)
     const rawDate = entry?.createdAt ?? null
     const parsedDate = rawDate ? new Date(rawDate) : null
+    // Prefer adTitle (or renderer's subtitle) as the main visible title in the card.
+    // If an ad title exists, push the renderer's `title` (event name) to `subtitle` to avoid duplication.
+    const adTitleValue = entry?.adTitle ?? base.subtitle ?? ''
+    const displayTitle = adTitleValue ? toText(adTitleValue) : base.title
+    const displaySubtitle = adTitleValue ? (base.title || '') : (base.subtitle || '')
 
     return {
       ...base,
+      title: displayTitle,
+      subtitle: displaySubtitle,
       isRead: Boolean(entry?.isRead),
       date: rawDate,
       timestamp: rawDate,
