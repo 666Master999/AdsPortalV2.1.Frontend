@@ -1,3 +1,5 @@
+import { useNotificationsStore } from '../stores/notificationsStore'
+
 const listeners = new Set()
 let sequence = 0
 
@@ -32,6 +34,21 @@ export function pushNotification(payload = {}) {
       // Ignore listener errors to keep notifications flow stable.
     }
   })
+
+  // Add local notification to notifications store so push notifications
+  // appear in the unified in-app notifications list (non-blocking).
+  try {
+    const notificationsStore = useNotificationsStore()
+    notificationsStore.upsertNotification({
+      id: item.id,
+      type: item.type,
+      createdAt: String(item.createdAt),
+      data: { message: item.message, code: item.code, details: item.details },
+      isRead: false,
+    })
+  } catch {
+    // Keep flow stable if store isn't available yet.
+  }
 
   return item
 }

@@ -6,6 +6,7 @@ import { useChatStore } from '../stores/chatStore'
 import { useNotificationsStore } from '../stores/notificationsStore'
 import { useAccessService } from '../services/accessService'
 import NotificationItem from './notifications/NotificationItem.vue'
+import { useGroupedNotifications } from '../composables/useGroupedNotifications'
 
 const userStore = useUserStore()
 const chatStore = useChatStore()
@@ -20,6 +21,20 @@ const canCreateAd = computed(() => access.canCreateAd())
 const canAccessAdmin = computed(() => access.canAccessAdmin())
 const canOpenDashboard = computed(() => access.canAccessAdmin() || access.canModerate())
 
+const uiStyles = {
+  brandMark: { width: '2.5rem', height: '2.5rem' },
+  notificationToggle: { width: '2.75rem', height: '2.75rem' },
+  dropdownMenu: { width: 'min(28rem, calc(100vw - 2rem))', maxHeight: '32rem' },
+  notificationsList: { maxHeight: '26rem' },
+}
+
+const groupedEntries = useGroupedNotifications(() => notificationsStore.notifications)
+const openedGroup = ref(null)
+
+function toggleGroup(id) {
+  openedGroup.value = openedGroup.value === id ? null : id
+}
+
 function closeDropdown() {
   const toggleEl = notificationsToggle.value
   const dropdownApi = window.bootstrap?.Dropdown?.getOrCreateInstance?.(toggleEl)
@@ -27,7 +42,9 @@ function closeDropdown() {
 }
 
 function openNotification(entry) {
-  const ids = Array.isArray(entry?.notificationIds) ? entry.notificationIds : []
+  const ids = Array.isArray(entry?.notificationIds)
+    ? entry.notificationIds
+    : (Number.isFinite(Number(entry?.id)) ? [Number(entry.id)] : [])
   notificationsStore.markRead(ids)
   closeDropdown()
 
@@ -38,7 +55,9 @@ function openNotification(entry) {
 }
 
 function editNotification(entry) {
-  const ids = Array.isArray(entry?.notificationIds) ? entry.notificationIds : []
+  const ids = Array.isArray(entry?.notificationIds)
+    ? entry.notificationIds
+    : (Number.isFinite(Number(entry?.id)) ? [Number(entry.id)] : [])
   notificationsStore.markRead(ids)
   closeDropdown()
 
@@ -47,8 +66,6 @@ function editNotification(entry) {
 
   router.push(`/ads/${adId}/edit`)
 }
-
-const notificationEntries = computed(() => notificationsStore.notificationEntries)
 
 async function handleLogout() {
   try {
@@ -65,7 +82,7 @@ async function handleLogout() {
   <nav class="navbar navbar-expand-lg navbar-light bg-white border-bottom shadow-sm sticky-top py-3">
     <div class="container">
       <router-link class="navbar-brand d-flex align-items-center gap-2 fw-semibold" to="/">
-        <span class="d-inline-flex align-items-center justify-content-center rounded-circle bg-primary text-white fw-bold shadow-sm" style="width:2.5rem;height:2.5rem;">A</span>
+        <span class="d-inline-flex align-items-center justify-content-center rounded-circle bg-primary text-white fw-bold shadow-sm" :style="uiStyles.brandMark">A</span>
         <span>
           <span class="d-block lh-1">AdsPortal V2</span>
           <small class="text-secondary fw-normal">Clean realtime marketplace</small>
@@ -122,7 +139,7 @@ async function handleLogout() {
               <button
                 ref="notificationsToggle"
                 class="btn btn-light rounded-circle shadow-sm position-relative d-inline-flex align-items-center justify-content-center"
-                style="width:2.75rem;height:2.75rem;"
+                :style="uiStyles.notificationToggle"
                 type="button"
                 data-bs-toggle="dropdown"
                 aria-expanded="false"
@@ -140,7 +157,7 @@ async function handleLogout() {
                 </span>
               </button>
 
-              <div class="dropdown-menu dropdown-menu-end border-0 shadow-lg rounded-4 p-0 overflow-hidden bg-body" style="width:min(28rem, calc(100vw - 2rem)); max-height:32rem;">
+              <div class="dropdown-menu dropdown-menu-end border-0 shadow-lg rounded-4 p-0 overflow-hidden bg-body" :style="uiStyles.dropdownMenu">
                 <div class="bg-body-tertiary border-bottom px-3 py-3 d-flex align-items-center justify-content-between">
                   <div>
                     <div class="fw-semibold text-dark">Уведомления</div>
@@ -154,17 +171,48 @@ async function handleLogout() {
                   </button>
                 </div>
 
-                <div v-if="!notificationsStore.notifications.length" class="text-secondary small text-center py-4 px-3">
+                <div v-if="!(notificationsStore.notifications?.length)" class="text-secondary small text-center py-4 px-3">
                   Нет уведомлений
                 </div>
 
-                <div v-else class="overflow-y-auto p-2 d-grid gap-2" style="max-height:26rem;">
-                  <div v-for="entry in notificationEntries" :key="entry.key">
-                    <NotificationItem
-                      :entry="entry"
-                      @open="openNotification(entry)"
-                      @edit="editNotification(entry)"
-                    />
+                <div v-else class="overflow-y-auto p-2 d-grid gap-2" :style="uiStyles.notificationsList">
+                  <div v-for="entry in groupedEntries" :key="entry.key">
+                    <div v-if="entry.type === 'group'" class="accordion accordion-flush mb-2">
+                      <div class="accordion-item border-0">
+                        <h2 class="accordion-header">
+                          <button
+                            class="accordion-button p-0 bg-transparent shadow-none d-flex align-items-center gap-2 w-100"
+                            :class="openedGroup === entry.key ? '' : 'collapsed'"
+                            type="button"
+                            @click.stop="toggleGroup(entry.key)"
+                            :aria-expanded="openedGroup === entry.key"
+                          >
+                            <NotificationItem class="flex-grow-1" :entry="entry.items[0]" :compact="true" />
+                            <span class="badge bg-secondary ms-2">{{ entry.items.length }}</span>
+                          </button>
+                        </h2>
+
+                        <div v-show="openedGroup === entry.key" class="p-2 ps-2 position-relative overflow-hidden" style="min-height:0;">
+                          <div class="d-grid gap-2">
+                            <NotificationItem
+                              v-for="item in entry.items"
+                              :key="item.id"
+                              :entry="item"
+                              @open="() => openNotification(item)"
+                              @edit="() => editNotification(item)"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    <div v-else>
+                      <NotificationItem
+                        :entry="entry.item"
+                        @open="() => openNotification(entry.item)"
+                        @edit="() => editNotification(entry.item)"
+                      />
+                    </div>
                   </div>
                 </div>
               </div>

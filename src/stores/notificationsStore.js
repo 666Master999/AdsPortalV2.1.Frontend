@@ -5,58 +5,13 @@ import { useChatStore } from './chatStore'
 import { getApiBaseUrl } from '../config/apiBase'
 import { apiClient } from '../api/apiClient'
 import { validateApiRequestBody } from '../api/requestContract'
-import { resolveMediaUrl } from '../utils/resolveMediaUrl'
 
 const apiBase = getApiBaseUrl()
 
 export const useNotificationsStore = defineStore('notifications', () => {
   const notifications = ref([])
   const unreadCount = computed(() => notifications.value.filter(n => !n.isRead).length)
-  const notificationEntries = computed(() => {
-    const items = Array.isArray(notifications.value) ? notifications.value : []
-    const groups = new Map()
-
-    for (const notification of items) {
-      const adId = Number(notification?.adId ?? notification?.data?.adId)
-      const key = Number.isFinite(adId) && adId > 0 ? `ad:${adId}` : `id:${notification.id}`
-      if (!groups.has(key)) groups.set(key, [])
-      groups.get(key).push(notification)
-    }
-
-    const entries = []
-
-    for (const [key, list] of groups) {
-      const first = list[0]
-      const adId = Number(first?.adId ?? first?.data?.adId)
-
-      if (Number.isFinite(adId) && adId > 0 && list.length > 1) {
-        entries.push({
-          key,
-          type: 'NotificationGroup',
-          adId,
-          notificationIds: list.map(item => item.id),
-          isRead: list.every(item => item.isRead),
-          createdAt: first.createdAt,
-          preview: first.preview,
-          data: { count: list.length },
-        })
-        continue
-      }
-
-      entries.push({
-        key: `id:${first.id}`,
-        type: first.type,
-        adId: Number.isFinite(adId) && adId > 0 ? adId : null,
-        notificationIds: [first.id],
-        isRead: first.isRead,
-        createdAt: first.createdAt,
-        preview: first.preview,
-        data: first.data,
-      })
-    }
-
-    return entries
-  })
+  // store holds only flat notifications; grouping and UI logic belongs to components
 
   let connection = null
 
@@ -79,15 +34,15 @@ export const useNotificationsStore = defineStore('notifications', () => {
     const preview = item.preview && typeof item.preview === 'object' ? { ...item.preview } : undefined
     const data = item.data && typeof item.data === 'object' ? { ...item.data } : undefined
 
-    const previewImagePath = preview?.mainImagePath ?? ''
-
-    if (preview && previewImagePath) {
-      try {
-        preview.mainImagePath = resolveMediaUrl(previewImagePath)
-      } catch {
-        // keep original if resolution fails
-      }
+    // Keep preview paths raw; UI layer is responsible for resolving media URLs.
+    // Normalize adId to a safe numeric value or null to avoid NaN later
+    const rawAdId = item.adId ?? item.data?.adId ?? null
+    let adId = null
+    if (rawAdId != null) {
+      const num = Number(rawAdId)
+      adId = Number.isFinite(num) && num > 0 ? num : null
     }
+
     return {
       id,
       type,
@@ -95,7 +50,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
       createdAt,
       preview,
       data,
-      adId: item.adId ?? item.data?.adId ?? null,
+      adId,
       reason: item.reason ?? item.data?.reason ?? null,
     }
   }
@@ -205,144 +160,7 @@ export const useNotificationsStore = defineStore('notifications', () => {
     await connection.stop()
     connection = null
   }
+  // Store is intentionally data-only: UI rendering logic lives in components.
 
-  // View-model mapping: map backend notification object to a UI-friendly shape
-  function toText(value) {
-    return typeof value === 'string'
-      ? value.trim()
-      : value != null
-        ? String(value)
-        : ''
-  }
-
-  function getEntryAdId(n) {
-    const value = Number(n?.adId ?? n?.data?.adId)
-    return Number.isFinite(value) && value > 0 ? value : null
-  }
-
-  function normalizeImage(image) {
-    return typeof image === 'string' && image.trim() ? image.trim() : ''
-  }
-
-  function getFieldErrors(value) {
-    if (!Array.isArray(value)) return []
-
-    return value
-      .map((item) => {
-        if (!item || typeof item !== 'object') return null
-
-        const field = toText(item.field)
-        const message = toText(item.message)
-        if (!field && !message) return null
-
-        return { field, message }
-      })
-      .filter(Boolean)
-  }
-
-  const renderers = {
-    NotificationGroup(n) {
-      const count = Number(n?.data?.count) || 0
-
-      return {
-        title: count > 1 ? `${count} уведомлений` : 'Уведомление',
-        subtitle: toText(n?.preview?.title),
-        image: normalizeImage(n?.preview?.mainImagePath),
-        meta: count > 1 ? `${count} уведомлений по объявлению` : '',
-        details: [],
-        actionLabel: '',
-        action: null,
-        variant: 'default',
-      }
-    },
-
-    AdApproved(n) {
-      const actorName = toText(n?.data?.actorName)
-
-      return {
-        title: 'Объявление одобрено',
-        subtitle: toText(n?.preview?.title),
-        image: normalizeImage(n?.preview?.mainImagePath),
-        meta: actorName ? `Модератор: ${actorName}` : '',
-        details: [],
-        actionLabel: '',
-        action: null,
-        variant: 'success',
-      }
-    },
-
-    AdRejected(n) {
-      const actorName = toText(n?.data?.actorName)
-      const reason = toText(n?.data?.reason ?? n?.reason)
-      const meta = [actorName ? `Модератор: ${actorName}` : '', reason ? `Причина: ${reason}` : '']
-        .filter(Boolean)
-        .join(' · ')
-
-      const adId = getEntryAdId(n)
-
-      return {
-        title: 'Объявление отклонено',
-        subtitle: toText(n?.preview?.title),
-        image: normalizeImage(n?.preview?.mainImagePath),
-        meta,
-        details: getFieldErrors(n?.data?.fieldErrors),
-        actionLabel: adId == null ? '' : 'Исправить',
-        action: adId == null ? null : { type: 'edit', payload: { adId } },
-        variant: 'danger',
-      }
-    },
-
-    UserBanned() {
-      return {
-        title: 'Аккаунт заблокирован',
-        subtitle: '',
-        image: '',
-        meta: '',
-        details: [],
-        actionLabel: '',
-        action: null,
-        variant: 'danger',
-      }
-    },
-
-    __default(n) {
-      return {
-        title: 'Уведомление',
-        subtitle: toText(n?.preview?.title),
-        image: normalizeImage(n?.preview?.mainImagePath),
-        meta: n?.type ? `Тип: ${n.type}` : '',
-        details: [],
-        actionLabel: '',
-        action: null,
-        variant: 'default',
-      }
-    },
-  }
-
-  function mapNotificationToView(n) {
-    const renderer = renderers[n?.type] || renderers.__default
-    const base = renderer(n || {})
-    const rawDate = n?.createdAt ?? null
-
-    return {
-      id: n?.id ?? null,
-      title: base.title,
-      subtitle: base.subtitle,
-      image: normalizeImage(base.image),
-      meta: base.meta || '',
-      details: base.details || [],
-      actionLabel: base.actionLabel || '',
-      action: base.action || null,
-      isRead: Boolean(n?.isRead),
-      date: rawDate,
-      timestamp: rawDate,
-      adId: getEntryAdId(n),
-      notificationIds: Array.isArray(n?.notificationIds)
-        ? n.notificationIds.map(id => Number(id)).filter(Number.isFinite)
-        : (Number.isFinite(Number(n?.id)) ? [Number(n.id)] : []),
-      variant: base.variant || 'default',
-    }
-  }
-
-  return { notifications, unreadCount, notificationEntries, fetchNotifications, markRead, connect, disconnect, mapNotificationToView }
+  return { notifications, unreadCount, fetchNotifications, markRead, connect, disconnect }
 })
