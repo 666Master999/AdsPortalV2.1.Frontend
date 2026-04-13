@@ -39,13 +39,14 @@ const {
   priceTo,
   selectedLocationIds,
   adsCountLabel,
+  isPaginationVisible,
   setPage,
   setPageSize,
   setSort,
   resetFilters,
   onSearchInput,
   applyFilters,
-  initWithCategoryId,
+  initFromUrl,
 } = useAdsList()
 
 // UI-only state (not part of URL / data flow)
@@ -72,13 +73,18 @@ function onPageSizeChange(newSize) {
 
 // --- Init ---
 
-onMounted(() => {
+onMounted(async () => {
   const saved = localStorage.getItem('filters-open')
   if (saved !== null) isFiltersOpen.value = saved === 'true'
   else if (window.innerWidth < 1400) isFiltersOpen.value = false
 
   categoriesStore.loadCategories()
-  initWithCategoryId(String(route.params.id || '').trim())
+
+  try {
+    await initFromUrl()
+  } catch (e) {
+    console.error(e)
+  }
 })
 
 // Watch /category/:id route changes
@@ -86,7 +92,7 @@ watch(
   () => route.params.id,
   newId => {
     const id = String(newId || '').trim()
-    if (id === category.value) return
+    if (!id || id === category.value) return
     category.value = id
     applyFilters()
   }
@@ -215,7 +221,7 @@ watch(isFiltersOpen, val => localStorage.setItem('filters-open', String(val)))
 
               <p v-if="!items.length" class="text-muted mt-4 text-center mb-0">Объявлений пока нет</p>
 
-              <div class="mt-4">
+              <div v-if="isPaginationVisible && totalPages" class="mt-4">
                 <Pagination
                   :currentPage="page"
                   :totalPages="totalPages"

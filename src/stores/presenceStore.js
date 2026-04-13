@@ -10,7 +10,9 @@ export const usePresenceStore = defineStore('presence', () => {
   let reconnectTimer = null
   let manualDisconnect = false
   let activeConversationGroupId = null
-  const subscribedRelevantUserIds = new Set()
+  const chatTrackedUserIds = new Set()
+  const interestMap = reactive(new Map())
+  let refreshPromise = null
 
   const RECONNECT_DELAY_MIN = 2000
   const RECONNECT_DELAY_MAX = 5000
@@ -79,6 +81,7 @@ export const usePresenceStore = defineStore('presence', () => {
     const cid = normalizeUserId(conversationId)
     if (!id || !cid) return
     dialogByUser.set(id, cid)
+    try { console.debug && console.debug('[presence] setUserDialog', { userId: id, conversationId: cid }) } catch (e) {}
   }
 
   function clearUserDialog(userId, conversationId = null) {
@@ -89,11 +92,47 @@ export const usePresenceStore = defineStore('presence', () => {
       if (cid && dialogByUser.get(id) !== cid) return
     }
     dialogByUser.delete(id)
+    try { console.debug && console.debug('[presence] clearUserDialog', { userId: id, conversationId: conversationId == null ? null : String(conversationId) }) } catch (e) {}
   }
 
   function isDialogPresencePayload(payload) {
     if (!payload || typeof payload !== 'object') return false
-    return isUserId(payload.userId) && isUserId(payload.conversationId)
+    const conversationId = payload.conversationId
+    const hasConversationId = typeof conversationId === 'string'
+      ? conversationId.trim().length > 0
+      : Number.isFinite(Number(conversationId))
+
+    return isUserId(payload.userId) && hasConversationId
+  }
+
+  function isDialogInitPayload(payload) {
+    if (!payload || typeof payload !== 'object') return false
+    const conversationId = payload.conversationId
+    const activeUsers = payload.activeUsers
+    const hasConversationId = typeof conversationId === 'string'
+      ? conversationId.trim().length > 0
+      : Number.isFinite(Number(conversationId))
+    return hasConversationId && Array.isArray(activeUsers) && activeUsers.every(u => typeof u === 'string')
+  }
+
+  function updateActiveUsers(conversationId, activeUsers = []) {
+    const cid = normalizeUserId(conversationId)
+    if (!cid) return
+    const ids = normalizeUserIdList(activeUsers)
+
+    // Set dialogByUser for each active user
+    for (const u of ids) {
+      dialogByUser.set(u, cid)
+    }
+
+    // Remove users that were previously marked as in this conversation but are no longer present
+    for (const [userId, existingCid] of Array.from(dialogByUser.entries())) {
+      if (existingCid === cid && !ids.includes(userId)) {
+        dialogByUser.delete(userId)
+      }
+    }
+
+    try { console.debug && console.debug('[presence] updateActiveUsers', { conversationId: cid, activeUsers: ids }) } catch (e) {}
   }
 
   function isPresenceOfflinePayload(payload) {
@@ -111,6 +150,94 @@ export const usePresenceStore = defineStore('presence', () => {
   function getUserDialogConversationId(userId) {
     const id = normalizeUserId(userId)
     return id ? dialogByUser.get(id) ?? null : null
+  }
+
+  function subscribePresence() {
+    if (!isConnected()) return Promise.resolve()
+    return connection.invoke('SubscribePresence').catch(() => {})
+  }
+
+  function enterConversationPresence(conversationId) {
+    const cid = Number(conversationId)
+    if (!Number.isFinite(cid) || cid <= 0 || !isConnected()) return Promise.resolve()
+    return connection.invoke('EnterConversation', cid).catch(() => {})
+  }
+
+  function leaveConversationPresence(conversationId) {
+    const cid = Number(conversationId)
+    if (!Number.isFinite(cid) || cid <= 0 || !isConnected()) return Promise.resolve()
+    return connection.invoke('LeaveConversation', cid).catch(() => {})
+  }
+
+  function subscribeUserIds(userIds = []) {
+    if (!isConnected()) return Promise.resolve()
+
+    const ids = normalizeUserIdList(userIds)
+    if (!ids.length) return Promise.resolve()
+
+    return connection.invoke('SubscribeToUsers', ids).catch(() => {})
+  }
+
+  function unsubscribeUserIds(userIds = []) {
+    if (!isConnected()) return Promise.resolve()
+
+    const ids = normalizeUserIdList(userIds)
+    if (!ids.length) return Promise.resolve()
+
+    return connection.invoke('UnsubscribeFromUsers', ids).catch(() => {})
+  }
+
+  function addUserInterest(userIds = []) {
+    const ids = normalizeUserIdList(userIds)
+    const toSubscribe = []
+
+    for (const userId of ids) {
+      const count = interestMap.get(userId) || 0
+      interestMap.set(userId, count + 1)
+      if (count === 0) toSubscribe.push(userId)
+    }
+
+    return toSubscribe
+  }
+
+  function removeUserInterest(userIds = []) {
+    const ids = normalizeUserIdList(userIds)
+    const toUnsubscribe = []
+
+    for (const userId of ids) {
+      const count = interestMap.get(userId) || 0
+      if (count <= 1) {
+        interestMap.delete(userId)
+        onlineUsers.delete(userId)
+        dialogByUser.delete(userId)
+        toUnsubscribe.push(userId)
+        continue
+      }
+
+      interestMap.set(userId, count - 1)
+    }
+
+    return toUnsubscribe
+  }
+
+  function trackUser(userId) {
+    void trackUsers([userId])
+  }
+
+  function untrackUser(userId) {
+    void untrackUsers([userId])
+  }
+
+  function trackUsers(userIds = []) {
+    const toSubscribe = addUserInterest(userIds)
+    if (!toSubscribe.length) return Promise.resolve()
+    return subscribeUserIds(toSubscribe).then(() => scheduleRefresh())
+  }
+
+  function untrackUsers(userIds = []) {
+    const toUnsubscribe = removeUserInterest(userIds)
+    if (!toUnsubscribe.length) return Promise.resolve()
+    return unsubscribeUserIds(toUnsubscribe)
   }
 
   function clearReconnectTimer() {
@@ -163,45 +290,52 @@ export const usePresenceStore = defineStore('presence', () => {
   }
 
   async function syncRelevantUserSubscriptions(userIds = []) {
-    if (!isConnected()) return
-
     const nextUserIds = new Set(normalizeUserIdList(userIds))
     const toUnsubscribe = []
-    for (const userId of subscribedRelevantUserIds) {
+    for (const userId of chatTrackedUserIds) {
       if (!nextUserIds.has(userId)) toUnsubscribe.push(userId)
     }
 
     const toSubscribe = []
     for (const userId of nextUserIds) {
-      if (!subscribedRelevantUserIds.has(userId)) toSubscribe.push(userId)
+      if (!chatTrackedUserIds.has(userId)) toSubscribe.push(userId)
     }
 
     if (toUnsubscribe.length) {
-      await connection.invoke('UnsubscribeFromUsers', toUnsubscribe)
+      await untrackUsers(toUnsubscribe)
     }
 
     if (toSubscribe.length) {
-      await connection.invoke('SubscribeToUsers', toSubscribe)
+      await trackUsers(toSubscribe)
     }
 
-    subscribedRelevantUserIds.clear()
+    chatTrackedUserIds.clear()
     for (const userId of nextUserIds) {
-      subscribedRelevantUserIds.add(userId)
+      chatTrackedUserIds.add(userId)
     }
   }
 
-  async function refreshRelevantPresence() {
-    onlineUsers.clear()
-    const relevantUserIds = await getRelevantUserIds()
-    await syncRelevantUserSubscriptions(relevantUserIds)
+  async function refreshTrackedPresence() {
+    const trackedUserIds = Array.from(interestMap.keys())
 
-    if (!relevantUserIds.length || !isConnected()) return
+    if (!trackedUserIds.length || !isConnected()) return
 
-    const ids = await connection.invoke('GetRelevantOnlineUsers', relevantUserIds)
+    const ids = await connection.invoke('GetRelevantOnlineUsers', trackedUserIds)
     if (!Array.isArray(ids)) {
       throw new Error('GetRelevantOnlineUsers must return an array of ids')
     }
     replaceOnlineUsers(ids)
+  }
+
+  function scheduleRefresh() {
+    if (refreshPromise) return refreshPromise
+
+    refreshPromise = Promise.resolve().then(async () => {
+      refreshPromise = null
+      await refreshTrackedPresence()
+    })
+
+    return refreshPromise
   }
 
   async function connect() {
@@ -237,17 +371,30 @@ export const usePresenceStore = defineStore('presence', () => {
       dialogByUser.delete(userId)
 
       if (wasOnline) {
-        const last = (payload && payload.lastActivityAt) ? payload.lastActivityAt : new Date()
-        setLastActivity(userId, last)
+        // If we saw the user online locally, treat offline event as "just now"
+        // so UI counts time from the local moment of disconnect instead of
+        // trusting possibly stale server-provided lastActivityAt.
+        setLastActivity(userId, new Date())
+      } else {
+        // User was already offline locally — accept server-provided lastActivityAt if present
+        const last = (payload && payload.lastActivityAt) ? payload.lastActivityAt : null
+        if (last) setLastActivity(userId, last)
       }
     })
 
     onSafe(connection, 'presence:inDialog', isDialogPresencePayload, (payload) => {
+      // Set single user, and if server provides the full activeUsers list, reconcile state
       setUserDialog(payload.userId, payload.conversationId)
+      if (Array.isArray(payload.activeUsers)) updateActiveUsers(payload.conversationId, payload.activeUsers)
     })
 
     onSafe(connection, 'presence:leftDialog', isDialogPresencePayload, (payload) => {
       clearUserDialog(payload.userId, payload.conversationId)
+    })
+
+    // Server may send initial dialog state when client enters conversation group
+    onSafe(connection, 'presence:initDialog', isDialogInitPayload, (payload) => {
+      updateActiveUsers(payload.conversationId, payload.activeUsers)
     })
 
     // chat:typing — per-conversation typing events; front-end handles timeout
@@ -325,9 +472,11 @@ export const usePresenceStore = defineStore('presence', () => {
       clearReconnectTimer()
       onlineUsers.clear()
       dialogByUser.clear()
-      subscribedRelevantUserIds.clear()
+      await subscribePresence()
+      await subscribeUserIds(Array.from(interestMap.keys()))
       await joinActiveGroup()
-      await refreshRelevantPresence()
+      await enterConversationPresence(activeConversationGroupId)
+      await refreshTrackedPresence()
       startPing()
       isPresenceReady.value = true
     })
@@ -335,15 +484,19 @@ export const usePresenceStore = defineStore('presence', () => {
     connection.onclose(() => {
       isPresenceReady.value = false
       stopPing()
-      subscribedRelevantUserIds.clear()
+      onlineUsers.clear()
+      dialogByUser.clear()
       connection = null
       scheduleReconnect()
     })
 
     try {
       await connection.start()
+      await subscribePresence()
+      await subscribeUserIds(Array.from(interestMap.keys()))
       await joinActiveGroup()
-      await refreshRelevantPresence()
+      await enterConversationPresence(activeConversationGroupId)
+      await refreshTrackedPresence()
       isPresenceReady.value = true
       startPing()
     } catch {
@@ -364,10 +517,19 @@ export const usePresenceStore = defineStore('presence', () => {
   const id = normalizeUserId(userId)
   if (!id || !isoOrDate) return
 
-  const date = new Date(isoOrDate)
-  if (isNaN(date.getTime())) return
+    const date = new Date(isoOrDate)
+    if (isNaN(date.getTime())) return
 
-  lastActivityByUser.set(id, date.toISOString())
+    // Protect against overwriting a newer lastActivity with an older value
+    const existingIso = lastActivityByUser.get(id)
+    if (existingIso) {
+      const existingDate = new Date(existingIso)
+      if (!isNaN(existingDate.getTime()) && date.getTime() <= existingDate.getTime()) {
+        return
+      }
+    }
+
+    lastActivityByUser.set(id, date.toISOString())
 }
 
 function getLastActivity(userId) {
@@ -408,17 +570,20 @@ function applyUserProfileDto(payload) {
     if (!cid) return
 
     if (activeConversationGroupId && activeConversationGroupId !== cid) {
+      const previousCid = activeConversationGroupId
+      useTypingStore().clearConversation(previousCid)
+      await leaveConversationPresence(previousCid)
       await syncRelevantUserSubscriptions([])
       if (isConnected()) {
-        await connection.invoke('LeaveGroup', Number(activeConversationGroupId)).catch(() => {})
+        await connection.invoke('LeaveGroup', Number(previousCid)).catch(() => {})
       }
-      useTypingStore().clearConversation(activeConversationGroupId)
-      dialogByUser.clear()
     }
 
     activeConversationGroupId = cid
+    const relevantUserIds = await getRelevantUserIds()
+    await syncRelevantUserSubscriptions(relevantUserIds)
     await joinActiveGroup()
-    await refreshRelevantPresence()
+    await enterConversationPresence(cid)
   }
 
   async function leaveConversation(conversationId) {
@@ -430,7 +595,7 @@ function applyUserProfileDto(payload) {
     }
 
     useTypingStore().clearConversation(cid)
-    dialogByUser.clear()
+    await leaveConversationPresence(cid)
     await syncRelevantUserSubscriptions([])
 
     if (!isConnected()) return
@@ -458,9 +623,10 @@ function applyUserProfileDto(payload) {
     isPresenceReady.value = false
     stopPing()
     activeConversationGroupId = null
+    chatTrackedUserIds.clear()
+    interestMap.clear()
     onlineUsers.clear()
     dialogByUser.clear()
-    subscribedRelevantUserIds.clear()
 
     if (connection) {
       await connection.stop()
@@ -477,6 +643,7 @@ function applyUserProfileDto(payload) {
     getUserDialogConversationId,
     getLastActivity,
     setLastActivity,
+    subscribePresence,
     applyUserProfileDto,
     applyUserProfiles,
     connect,
@@ -484,6 +651,8 @@ function applyUserProfileDto(payload) {
     joinConversation,
     leaveConversation,
     handleTypingInput,
+    trackUser,
+    untrackUser,
     sendRead,
   }
 })

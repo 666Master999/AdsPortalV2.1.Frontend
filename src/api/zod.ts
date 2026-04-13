@@ -64,6 +64,8 @@ const AdminAdListItemDtoPagedResultDto = z
     page: z.number().int(),
     pageSize: z.number().int(),
     totalPages: z.number().int(),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
   })
   .partial();
 const PatchIssueDto = z
@@ -101,6 +103,8 @@ const UserDtoPagedResultDto = z
     page: z.number().int(),
     pageSize: z.number().int(),
     totalPages: z.number().int(),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
   })
   .partial();
 const AdminAuditLogDto = z
@@ -124,6 +128,8 @@ const AdminAuditLogDtoPagedResultDto = z
     page: z.number().int(),
     pageSize: z.number().int(),
     totalPages: z.number().int(),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
   })
   .partial();
 const RestrictionTypeDto = z
@@ -215,6 +221,8 @@ const AdListItemDtoPagedResultDto = z
     page: z.number().int(),
     pageSize: z.number().int(),
     totalPages: z.number().int(),
+    nextCursor: z.string().nullable(),
+    hasMore: z.boolean(),
   })
   .partial();
 const postAds_Body = z
@@ -352,6 +360,7 @@ const ConversationCompanionDto = z
     id: z.number().int(),
     name: z.string(),
     avatarPath: z.string().nullable(),
+    lastActivityAt: z.string().datetime({ offset: true }).nullable(),
   })
   .partial();
 const ConversationAdDto = z
@@ -444,31 +453,11 @@ const SendMessageRequest = z
     type: MessageType,
     text: z.string().nullable(),
     replyToMessageId: z.number().int().nullable(),
-  })
-  .partial();
-const DialogMessageEventType = z.enum([
-  "created",
-  "edited",
-  "deleted",
-  "patched",
-]);
-const ChatMessage = z
-  .object({
-    id: z.number().int(),
-    eventType: DialogMessageEventType,
-    type: MessageType,
-    authorId: z.number().int(),
-    createdAt: z.string().datetime({ offset: true }),
     clientTag: z.string().nullable(),
-    text: z.string().nullable(),
-    attachments: z.array(ChatAttachment).nullable(),
-    replyToMessageId: z.number().int().nullable(),
-    editedAt: z.string().datetime({ offset: true }).nullable(),
-    deletedAt: z.string().datetime({ offset: true }).nullable(),
   })
   .partial();
 const ConversationMessageActionDto = z
-  .object({ conversationId: z.number().int(), message: ChatMessage })
+  .object({ conversationId: z.number().int(), message: ConversationMessageDto })
   .partial();
 const postConversationsIdmessagesupload_Body = z
   .object({
@@ -615,6 +604,20 @@ const FavoriteMutationDto = z
     addedAt: z.string().datetime({ offset: true }).nullable(),
   })
   .partial();
+const BlockUserDto = z
+  .object({
+    id: z.number().int(),
+    username: z.string(),
+    avatarUrl: z.string().nullable(),
+  })
+  .partial();
+const BlockListItemDto = z
+  .object({
+    targetUserId: z.number().int(),
+    createdAt: z.string().datetime({ offset: true }),
+    user: BlockUserDto,
+  })
+  .partial();
 const AvatarUploadDto = z.object({ avatarPath: z.string() }).partial();
 
 export const schemas = {
@@ -670,8 +673,6 @@ export const schemas = {
   ConversationMessageDto,
   ConversationMessagesDto,
   SendMessageRequest,
-  DialogMessageEventType,
-  ChatMessage,
   ConversationMessageActionDto,
   postConversationsIdmessagesupload_Body,
   postConversationsbyAdAdIdmessagesupload_Body,
@@ -688,6 +689,8 @@ export const schemas = {
   UserProfileResponseDto,
   FavoriteAdDto,
   FavoriteMutationDto,
+  BlockUserDto,
+  BlockListItemDto,
   AvatarUploadDto,
 };
 
@@ -1302,6 +1305,11 @@ const endpoints = makeApi([
       },
       {
         name: "Sort",
+        type: "Query",
+        schema: z.string().optional(),
+      },
+      {
+        name: "Cursor",
         type: "Query",
         schema: z.string().optional(),
       },
@@ -1975,6 +1983,42 @@ const endpoints = makeApi([
     alias: "getConversations",
     requestFormat: "json",
     response: z.array(ConversationDto),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "delete",
+    path: "/conversations/:id",
+    alias: "deleteConversationsId",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.void(),
     errors: [
       {
         status: 400,
@@ -2937,6 +2981,107 @@ const endpoints = makeApi([
       },
     ],
     response: z.object({ avatarPath: z.string() }).partial(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "post",
+    path: "/users/:targetId/blocks",
+    alias: "postUsersTargetIdblocks",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "targetId",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "delete",
+    path: "/users/:targetId/blocks",
+    alias: "deleteUsersTargetIdblocks",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "targetId",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/users/blocks",
+    alias: "getUsersblocks",
+    requestFormat: "json",
+    response: z.array(BlockListItemDto),
     errors: [
       {
         status: 400,

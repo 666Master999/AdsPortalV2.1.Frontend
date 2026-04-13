@@ -3,10 +3,12 @@ import { ref, computed } from 'vue'
 import { toPublicErrorMessage } from '../services/errorService'
 import { apiClient } from '../api/apiClient'
 import { validateApiRequestBody } from '../api/requestContract'
-import { validateAuthDto, validateUserDto } from '../utils/apiContract'
+import { fetchDeduped } from '../utils/fetchDeduped'
+import { validateAuthDto, validateBlockListDto, validateUserDto } from '../utils/apiContract'
 
 const RESTRICTIONS_CACHE_MS = 15000
 const PROFILE_CACHE_MS = 60000
+const BLOCKS_CACHE_MS = 15000
 
 function safeParseJson(value, fallback) {
   if (!value) return fallback
@@ -366,6 +368,95 @@ export const useUserStore = defineStore('user', () => {
   const isLoginBanned = computed(() => hasRestriction('LoginBan'))
   const canCreateAds = computed(() => !isPostBanned.value)
   const canSendMessages = computed(() => !isChatBanned.value)
+  const blockedUsers = ref([])
+  const blockedUserIds = ref([])
+  const blockedByUserIds = ref([])
+  let blockedUsersFetchedAt = 0
+
+  function getBlockOwnerId() {
+    return String(user.value?.id ?? tokenUserId.value ?? '').trim()
+  }
+
+  function getBlockRequestKey() {
+    const ownerId = getBlockOwnerId()
+    return ownerId ? `users:blocks:${ownerId}` : 'users:blocks'
+  }
+
+  function applyBlockedUsers(items = []) {
+    const list = Array.isArray(items)
+      ? items.filter(item => item && typeof item === 'object')
+      : []
+
+    blockedUsers.value = list
+    blockedUserIds.value = list
+      .map(item => normalizeUserId(item?.targetUserId))
+      .filter(id => id !== null && id !== undefined && String(id).trim() !== '')
+    blockedUsersFetchedAt = Date.now()
+
+    return blockedUsers.value
+  }
+
+  async function syncChatBlockState(options = {}) {
+    const { force = false } = options
+    const ownerId = getBlockOwnerId()
+
+    if (!ownerId) {
+      blockedUsers.value = []
+      blockedUserIds.value = []
+      blockedByUserIds.value = []
+      blockedUsersFetchedAt = 0
+      return blockedUsers.value
+    }
+
+    const now = Date.now()
+    const isCacheValid = blockedUsersFetchedAt > 0 && now - blockedUsersFetchedAt < BLOCKS_CACHE_MS
+    if (!force && isCacheValid) {
+      return blockedUsers.value
+    }
+
+    const items = await fetchDeduped(getBlockRequestKey(), async () => {
+      const json = await apiClient.get('/users/blocks', {
+        errorHandlerOptions: { notify: false, redirect: false },
+      })
+
+      return validateBlockListDto(json, { strict: true })
+    })
+
+    return applyBlockedUsers(items)
+  }
+
+  function isUserBlocked(targetUserId) {
+    const id = normalizeUserId(targetUserId)
+    return id !== null && id !== undefined && blockedUserIds.value.includes(id)
+  }
+
+  function isBlockedByUser(targetUserId) {
+    const id = normalizeUserId(targetUserId)
+    return id !== null && id !== undefined && blockedByUserIds.value.includes(id)
+  }
+
+  function setBlockedUserId(targetUserId, blocked = true) {
+    const id = normalizeUserId(targetUserId)
+    if (id === null || id === undefined || String(id).trim() === '') return
+
+    const next = new Set(blockedUserIds.value)
+    if (blocked) next.add(id)
+    else next.delete(id)
+
+    blockedUserIds.value = Array.from(next)
+    blockedUsersFetchedAt = 0
+  }
+
+  function setBlockedByUserId(targetUserId, blocked = true) {
+    const id = normalizeUserId(targetUserId)
+    if (id === null || id === undefined || String(id).trim() === '') return
+
+    const next = new Set(blockedByUserIds.value)
+    if (blocked) next.add(id)
+    else next.delete(id)
+
+    blockedByUserIds.value = Array.from(next)
+  }
 
   function setAuthState(nextState) {
     const allowed = new Set(['unauthenticated', 'authenticating', 'authenticated', 'refreshing', 'blocked'])
@@ -485,6 +576,10 @@ export const useUserStore = defineStore('user', () => {
 
     localStorage.setItem('user', JSON.stringify(user.value || null))
     updateAccessFromSource({ ...source, ...(user.value || {}) })
+    blockedUsers.value = []
+    blockedUserIds.value = []
+    blockedByUserIds.value = []
+    blockedUsersFetchedAt = 0
     setAuthState('authenticated')
   }
 
@@ -499,6 +594,10 @@ export const useUserStore = defineStore('user', () => {
     restrictionsFetchedAt = 0
     restrictionsPromise = null
     rateLimitState.value = null
+    blockedUsers.value = []
+    blockedUserIds.value = []
+    blockedByUserIds.value = []
+    blockedUsersFetchedAt = 0
     setAuthState('unauthenticated')
 
     localStorage.removeItem('user')
@@ -517,10 +616,20 @@ export const useUserStore = defineStore('user', () => {
 
     if (!token.value) {
       setAuthState('unauthenticated')
+      blockedUsers.value = []
+      blockedUserIds.value = []
+      blockedByUserIds.value = []
+      blockedUsersFetchedAt = 0
       return user.value
     }
 
     setAuthState('authenticated')
+
+    try {
+      await syncChatBlockState()
+    } catch {
+      // Ignore block list refresh errors during auth hydration.
+    }
 
     // If we have a token, prefer authoritative profile data from the API
     // Use a deduped/cached fetch to avoid duplicate requests on the same page.
@@ -725,7 +834,7 @@ export const useUserStore = defineStore('user', () => {
 
   async function fetchPublicProfile(id) {
     const json = await apiClient.get(`/users/${id}`, {
-      errorHandlerOptions: { notify: false },
+      errorHandlerOptions: { notify: false, redirect: false },
     })
 
     const validatedProfile = validateUserDto(json, { strict: true })
@@ -742,7 +851,7 @@ export const useUserStore = defineStore('user', () => {
 
   async function fetchProfile(id) {
     const data = await apiClient.get(`/users/${id}`, {
-      errorHandlerOptions: { notify: false },
+      errorHandlerOptions: { notify: false, redirect: false },
     })
 
     return validateUserDto(data, { strict: true })
@@ -828,6 +937,32 @@ export const useUserStore = defineStore('user', () => {
     })
   }
 
+  async function blockUser(targetUserId) {
+    const targetId = String(normalizeUserId(targetUserId) ?? '').trim()
+    if (!targetId) return null
+
+    await apiClient.post(`/users/${targetId}/blocks`, null, {
+      errorHandlerOptions: { notify: false, redirect: false },
+    })
+
+    setBlockedUserId(targetId, true)
+    await syncChatBlockState({ force: true }).catch(() => null)
+    return null
+  }
+
+  async function unblockUser(targetUserId) {
+    const targetId = String(normalizeUserId(targetUserId) ?? '').trim()
+    if (!targetId) return null
+
+    await apiClient.delete(`/users/${targetId}/blocks`, {
+      errorHandlerOptions: { notify: false, redirect: false },
+    })
+
+    setBlockedUserId(targetId, false)
+    await syncChatBlockState({ force: true }).catch(() => null)
+    return null
+  }
+
   return {
     user,
     token,
@@ -837,6 +972,7 @@ export const useUserStore = defineStore('user', () => {
     permissions,
     restrictions,
     rateLimitState,
+    blockedUsers,
     tokenUserId,
     canAccessAdmin,
     canModerateAds,
@@ -845,6 +981,13 @@ export const useUserStore = defineStore('user', () => {
     isLoginBanned,
     canCreateAds,
     canSendMessages,
+    isUserBlocked,
+    isBlockedByUser,
+    blockUser,
+    unblockUser,
+    setBlockedUserId,
+    setBlockedByUserId,
+    syncChatBlockState,
     login,
     register,
     logout,

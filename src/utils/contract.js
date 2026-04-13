@@ -15,6 +15,7 @@ export const CONTRACT_ERROR_CODE = Object.freeze({
   INVALID_IMAGE: 'INVALID_IMAGE',
   INVALID_USER: 'INVALID_USER',
   INVALID_USER_PROFILE: 'INVALID_USER_PROFILE',
+  INVALID_BLOCK: 'INVALID_BLOCK',
   INVALID_CONVERSATION: 'INVALID_CONVERSATION',
   INVALID_MESSAGE: 'INVALID_MESSAGE',
   INVALID_AUTH_RESPONSE: 'INVALID_AUTH_RESPONSE',
@@ -32,6 +33,7 @@ const CONTRACT_UI_MESSAGE_BY_CODE = Object.freeze({
   [CONTRACT_ERROR_CODE.INVALID_MESSAGE]: 'Ошибка данных чата',
   [CONTRACT_ERROR_CODE.INVALID_USER]: 'Ошибка профиля пользователя',
   [CONTRACT_ERROR_CODE.INVALID_USER_PROFILE]: 'Ошибка профиля пользователя',
+  [CONTRACT_ERROR_CODE.INVALID_BLOCK]: 'Ошибка данных блокировки',
   [CONTRACT_ERROR_CODE.INVALID_AUTH_RESPONSE]: 'Ошибка данных авторизации',
 })
 
@@ -438,6 +440,40 @@ function validateUserProfileCoreDto(value, objectName, { requireRoles = true } =
   }
 
   return user
+}
+
+function validateBlockUserDto(value, objectName = 'BlockUserDto') {
+  return runValidator(value, objectName, true, () => {
+    const user = assertObject(value, objectName)
+    assertIdentifierValue(assertField(user, 'id', { objectName }), objectName, 'id')
+    assertStringValue(assertField(user, 'username', { objectName }), objectName, 'username', { nonEmpty: true })
+    assertStringValue(assertField(user, 'avatarUrl', { objectName, allowNull: true }), objectName, 'avatarUrl', { allowNull: true })
+    return user
+  })
+}
+
+function validateBlockListItemDto(value, objectName = 'BlockListItemDto') {
+  return runValidator(value, objectName, true, () => {
+    const block = assertObject(value, objectName)
+    assertIdentifierValue(assertField(block, 'targetUserId', { objectName }), objectName, 'targetUserId')
+    assertDateTimeValue(assertField(block, 'createdAt', { objectName }), objectName, 'createdAt')
+    validateBlockUserDto(assertField(block, 'user', { objectName }), `${objectName}.user`)
+    return block
+  })
+}
+
+export function validateBlockListDto(value, options = {}) {
+  const { strict = true } = options
+  return runValidator(value, 'BlockListDto', strict, () => {
+    const source = unwrapEnvelope(value)
+    const items = Array.isArray(source)
+      ? source
+      : Array.isArray(source?.items)
+        ? source.items
+        : []
+    const list = assertArray(items, 'BlockListDto')
+    return list.map((item, index) => validateBlockListItemDto(item, `BlockListDto.items[${index}]`))
+  })
 }
 
 function validateAdOwnerDto(value, objectName = 'AdOwnerDto') {

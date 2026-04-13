@@ -1045,6 +1045,24 @@ export const useChatStore = defineStore('chat', () => {
     if (conv) { conv.isArchived = archived; conv.archived = archived }
   }
 
+  async function deleteConversation(conversationId) {
+    const cid = String(conversationId ?? '')
+    if (!cid) return null
+
+    await apiClient.delete(`/conversations/${cid}`, {
+      parseAs: 'raw',
+      okStatuses: [200, 204],
+      errorHandlerOptions: { notify: false },
+    })
+
+    conversations.value = conversations.value.filter(item => String(item.id) !== cid)
+    myLastSeenByConversation.delete(cid)
+    otherLastSeenByConversation.delete(cid)
+    unreadByConversation.delete(cid)
+
+    return null
+  }
+
   async function markReadRemote(conversationId, lastSeenMessageId) {
     const cid = String(conversationId ?? '')
     const msgId = Number(lastSeenMessageId)
@@ -1090,6 +1108,7 @@ export const useChatStore = defineStore('chat', () => {
     sendMessage, sendMessageByAdId, retryMessage,
     editMessage, addMessageAttachment, addMessageAttachments,
     deleteMessage,
+    deleteConversation,
     // Conversation settings
     mute, archive,
   }

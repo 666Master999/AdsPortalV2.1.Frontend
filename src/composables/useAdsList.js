@@ -1,4 +1,5 @@
 import { ref, computed, onUnmounted } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { storeToRefs } from 'pinia'
 import { useAdsStore } from '../stores/adsStore'
 import { normalizeLocationIdList } from './useLocations'
@@ -33,6 +34,11 @@ function normalizeText(value) {
   return String(value).trim()
 }
 
+function getRouteCursorValue(cursor) {
+  if (Array.isArray(cursor)) return normalizeText(cursor[0])
+  return normalizeText(cursor)
+}
+
 function buildSortValue(sortKey) {
   const { sortBy, sortDir } = splitSortKey(sortKey)
   const normalizedSortBy = String(sortBy || DEFAULT_SORT_BY).trim().replace(/^-+/, '') || DEFAULT_SORT_BY
@@ -41,6 +47,8 @@ function buildSortValue(sortKey) {
 
 export function useAdsList() {
   const adsStore = useAdsStore()
+  const route = useRoute()
+  const router = useRouter()
 
   const { ads: items, isLoading: loading, totalCount, page, pageSize, totalPages } = storeToRefs(adsStore)
 
@@ -52,6 +60,8 @@ export function useAdsList() {
   const dateFrom = ref('')
   const dateTo = ref('')
   const selectedLocationIds = ref([])
+  const cursors = ref([null])
+  const isUsingCursor = ref(false)
 
   const sortKey = ref(`${DEFAULT_SORT_BY}-${DEFAULT_SORT_DIR}`)
   const error = ref(null)
@@ -98,19 +108,42 @@ export function useAdsList() {
     return params
   }
 
-  async function refresh() {
+  async function replaceCursorQuery(cursorValue) {
+    const query = { ...route.query }
+    const normalizedCursor = normalizeText(cursorValue)
+    if (normalizedCursor) query.cursor = normalizedCursor
+    else delete query.cursor
+
+    await router.replace({ query })
+  }
+
+  async function loadOffsetPage(pageNumber) {
     error.value = null
+    isUsingCursor.value = false
+    cursors.value = [null]
 
     try {
-      await adsStore.loadAds(buildQueryParams())
+      const data = await adsStore.loadAds({ ...buildQueryParams(), page: pageNumber })
+      page.value = pageNumber
+      await replaceCursorQuery(null)
+      return data
     } catch (e) {
       error.value = e?.message || 'Ошибка загрузки данных'
+      return null
     }
+  }
+
+  async function refresh() {
+    page.value = DEFAULT_PAGE
+    await loadOffsetPage(DEFAULT_PAGE)
   }
 
   function applyFilters() {
     clearSearchTimer()
     page.value = DEFAULT_PAGE
+    isUsingCursor.value = false
+    cursors.value = [null]
+    adsStore.ads.value = []
     void refresh()
   }
 
@@ -123,17 +156,34 @@ export function useAdsList() {
     }, QUERY_DEBOUNCE_MS)
   }
 
-  function setPage(newPage) {
+  async function setPage(newPage) {
     clearSearchTimer()
     const parsed = Number(newPage)
-    page.value = Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_PAGE
-    void refresh()
+    const pageNumber = Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_PAGE
+
+    if (pageNumber === 1) {
+      await refresh()
+      return
+    }
+
+    const step = pageNumber - page.value
+    const nextCursor = cursors.value[1]
+
+    if (step === 1 && nextCursor !== undefined && nextCursor !== null) {
+      const data = await loadByCursor(nextCursor, pageNumber)
+      if (data) await replaceCursorQuery(nextCursor)
+      return
+    }
+
+    await loadOffsetPage(pageNumber)
   }
 
   function setPageSize(newSize) {
     clearSearchTimer()
     pageSize.value = clampPageSize(newSize)
     page.value = DEFAULT_PAGE
+    isUsingCursor.value = false
+    cursors.value = [null]
     void refresh()
   }
 
@@ -141,6 +191,8 @@ export function useAdsList() {
     clearSearchTimer()
     sortKey.value = `${sortBy || DEFAULT_SORT_BY}-${sortDir === 'asc' ? 'asc' : DEFAULT_SORT_DIR}`
     page.value = DEFAULT_PAGE
+    isUsingCursor.value = false
+    cursors.value = [null]
     void refresh()
   }
 
@@ -157,6 +209,9 @@ export function useAdsList() {
     sortKey.value = `${DEFAULT_SORT_BY}-${DEFAULT_SORT_DIR}`
     page.value = DEFAULT_PAGE
     pageSize.value = DEFAULT_PAGE_SIZE
+    isUsingCursor.value = false
+    cursors.value = [null]
+    adsStore.ads.value = []
     void refresh()
   }
 
@@ -165,8 +220,55 @@ export function useAdsList() {
     const id = String(routeCategoryId || '').trim()
     category.value = id
     page.value = DEFAULT_PAGE
+    isUsingCursor.value = false
+    cursors.value = [null]
     void refresh()
   }
+
+  const isPaginationVisible = computed(() => !isUsingCursor.value)
+
+  async function loadByCursor(cursorValue, pageNumber = page.value) {
+    error.value = null
+    isUsingCursor.value = true
+    try {
+      const data = await adsStore.loadAds({ ...buildQueryParams(), cursor: cursorValue, append: false })
+      page.value = pageNumber
+      cursors.value = data && typeof data === 'object' && data.nextCursor
+        ? [null, data.nextCursor]
+        : [null]
+      return data
+    } catch (e) {
+      error.value = e?.message || 'Ошибка загрузки данных'
+      isUsingCursor.value = false
+      return null
+    }
+  }
+
+  async function initFromUrl() {
+    category.value = String(route.params.id || '').trim()
+    page.value = DEFAULT_PAGE
+    isUsingCursor.value = false
+    cursors.value = [null]
+
+    const urlCursor = getRouteCursorValue(route.query.cursor)
+    if (urlCursor) {
+      isUsingCursor.value = true
+      page.value = 2
+      await loadByCursor(urlCursor, 2)
+      return
+    }
+
+    await refresh()
+  }
+
+  const visiblePages = computed(() => {
+    const current = page.value
+    const max = totalPages.value ?? current + 2
+    const start = Math.max(1, current - 2)
+    const end = Math.min(max, start + 9)
+    const adjustedStart = Math.max(1, end - 9)
+    return Array.from({ length: end - adjustedStart + 1 }, (_, i) => adjustedStart + i)
+  })
 
   onUnmounted(() => {
     clearSearchTimer()
@@ -189,6 +291,9 @@ export function useAdsList() {
     totalPages,
     totalCount,
     adsCountLabel,
+    cursors,
+    isUsingCursor,
+    visiblePages,
     priceFrom,
     priceTo,
     category,
@@ -205,5 +310,8 @@ export function useAdsList() {
     onSearchInput,
     applyFilters,
     initWithCategoryId,
+    loadByCursor,
+    initFromUrl,
+    isPaginationVisible,
   }
 }

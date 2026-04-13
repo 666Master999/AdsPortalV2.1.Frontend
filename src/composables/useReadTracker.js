@@ -6,7 +6,7 @@ const VISIBILITY_THRESHOLD = 0.6 // 60% of message must be visible
 
 const READ_DEBOUNCE_MS = 150
 
-export function useReadTracker(messagesContainer, shouldTrackMessage = () => true) {
+export function useReadTracker(messagesContainer, shouldTrackMessage = () => true, messagesSource = null) {
   const chatStore = useChatStore()
 
   // numbers only
@@ -18,6 +18,12 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
   let observer = null
   let debounceTimer = null
   const observedIds = new Set()
+
+  function getMessages() {
+    return messagesSource && typeof messagesSource === 'object' && 'value' in messagesSource
+      ? messagesSource.value || []
+      : messagesSource || chatStore.messages
+  }
 
   function isActiveConversation() {
     return Boolean(chatStore.currentConversation?.id)
@@ -102,7 +108,7 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
         if (!rawId) continue
         const idNum = Number(rawId)
         if (!Number.isFinite(idNum) || idNum <= 0) continue
-        const message = chatStore.messages.find(item => Number(item.id) === idNum)
+        const message = getMessages().find(item => Number(item.id) === idNum)
         if (!message) continue
         if (!shouldTrackMessage(message)) continue
 
@@ -129,7 +135,7 @@ export function useReadTracker(messagesContainer, shouldTrackMessage = () => tru
 
   function observeMessages() {
     if (!observer) return
-    for (const msg of chatStore.messages) {
+    for (const msg of getMessages()) {
       if (!shouldTrackMessage(msg)) continue
       const msgId = String(msg.id)
       if (observedIds.has(msgId)) continue

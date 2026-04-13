@@ -26,11 +26,6 @@ function closeDropdown() {
   dropdownApi?.hide()
 }
 
-function getNotificationAdId(notification) {
-  const adId = Number(notification?.adId ?? notification?.data?.adId)
-  return Number.isFinite(adId) && adId > 0 ? adId : null
-}
-
 function openNotification(entry) {
   const ids = Array.isArray(entry?.notificationIds) ? entry.notificationIds : []
   notificationsStore.markRead(ids)
@@ -53,51 +48,7 @@ function editNotification(entry) {
   router.push(`/ads/${adId}/edit`)
 }
 
-const notificationEntries = computed(() => {
-  const items = Array.isArray(notificationsStore.notifications) ? notificationsStore.notifications : []
-  const groups = new Map()
-
-  for (const notification of items) {
-    const adId = getNotificationAdId(notification)
-    const key = adId != null ? `ad:${adId}` : `id:${notification.id}`
-    if (!groups.has(key)) groups.set(key, [])
-    groups.get(key).push(notification)
-  }
-
-  const entries = []
-
-  for (const [key, list] of groups) {
-    const first = list[0]
-    const adId = getNotificationAdId(first)
-
-    if (adId != null && list.length > 1) {
-      entries.push({
-        key,
-        type: 'NotificationGroup',
-        adId,
-        notificationIds: list.map(item => item.id),
-        isRead: list.every(item => item.isRead),
-        createdAt: first.createdAt,
-        preview: first.preview,
-        data: { count: list.length },
-      })
-      continue
-    }
-
-    entries.push({
-      key: `id:${first.id}`,
-      type: first.type,
-      adId,
-      notificationIds: [first.id],
-      isRead: first.isRead,
-      createdAt: first.createdAt,
-      preview: first.preview,
-      data: first.data,
-    })
-  }
-
-  return entries
-})
+const notificationEntries = computed(() => notificationsStore.notificationEntries)
 
 async function handleLogout() {
   try {

@@ -5,8 +5,10 @@ import { useAdsStore } from '../stores/adsStore'
 import { useUserStore } from '../stores/userStore'
 import { useChatStore } from '../stores/chatStore'
 import { usePresenceStore } from '../stores/presenceStore'
+import { usePresenceAuto } from '../composables/usePresenceAuto'
 import { useLocations } from '../composables/useLocations'
 import { timeAgo } from '../utils/formatDate'
+import { useProgressiveTimeAgo } from '@/composables/useProgressiveTimeAgo'
 import { getModerationStatusClass, getModerationStatusLabel, normalizeModerationStatus } from '@/utils/moderationStatus'
 import { resolveMediaUrl } from '../utils/resolveMediaUrl'
 import { parsePatchIssues } from '../utils/patchResult'
@@ -66,14 +68,23 @@ const sellerInitial = computed(() => {
 
 const sellerId = computed(() => (ad.value?.user?.id != null ? String(ad.value.user.id) : ''))
 
+usePresenceAuto(sellerId)
+
 const sellerIsOnline = computed(() => presenceStore.isOnline(sellerId.value))
 
+const sellerLast = computed(() => presenceStore.getLastActivity(sellerId.value) ?? ad.value?.user?.lastActivityAt)
+const sellerLastLabel = useProgressiveTimeAgo(sellerLast, {
+  prefix: 'Был(а) в сети ',
+  strategy: 'messenger',
+  online: sellerIsOnline,
+  localLastSeen: computed(() => (sellerIsOnline.value ? null : presenceStore.getLastActivity(sellerId.value))),
+})
 const sellerLastSeenText = computed(() => {
   if (!presenceStore.isPresenceReady) return '...'
   if (sellerIsOnline.value) return 'в сети'
-  const last = presenceStore.getLastActivity(sellerId.value) ?? ad.value?.user?.lastActivityAt
+  const last = sellerLast.value
   if (!last) return 'был(а) давно'
-  return timeAgo(last, { prefix: 'Был(а) в сети ' })
+  return sellerLastLabel.value
 })
 
 const sellerLastSeenClass = computed(() => {
@@ -226,11 +237,11 @@ async function toggleFavorite() {
     if (isFavorite.value) {
       await userStore.removeFavorite(userId, ad.value.id)
       isFavorite.value = false
-      if (ad.value) ad.value.isFavorite = false
+      if (ad.value) adsStore.selectedAd = { ...ad.value, isFavorite: false }
     } else {
       await userStore.addFavorite(userId, ad.value.id)
       isFavorite.value = true
-      if (ad.value) ad.value.isFavorite = true
+      if (ad.value) adsStore.selectedAd = { ...ad.value, isFavorite: true }
     }
   } catch (err) {
     console.error(err)

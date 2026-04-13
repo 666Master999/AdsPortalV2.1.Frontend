@@ -28,6 +28,8 @@ const sessionsError = ref('')
 const sessionActionId = ref('')
 const logoutAllPending = ref(false)
 const logoutCurrentPending = ref(false)
+const blockedUsers = computed(() => Array.isArray(userStore.blockedUsers) ? userStore.blockedUsers : [])
+const blockedUsersError = ref('')
 
 const profileId = computed(() => parseInt(route.params.id) || userStore.user?.userId)
 
@@ -68,7 +70,9 @@ watchEffect(async () => {
     profile.value = null
     currentUserFavorites.value = []
     const apiError = await handleApiError(errorValue, { notify: false })
-    error.value = toPublicErrorMessage(apiError, 'Пользователь недоступен.')
+    error.value = apiError?.status === 404
+      ? 'Пользователь не найден или заблокирован.'
+      : toPublicErrorMessage(apiError, 'Пользователь недоступен.')
   }
 })
 
@@ -77,6 +81,14 @@ watchEffect(async () => {
     sessions.value = []
     sessionsError.value = ''
     return
+  }
+
+  try {
+    await userStore.syncChatBlockState()
+    blockedUsersError.value = ''
+  } catch {
+    // Keep the profile usable even if the block list request fails.
+    blockedUsersError.value = 'Не удалось загрузить список блокировок.'
   }
 
   sessionsLoading.value = true
@@ -155,6 +167,22 @@ async function logoutCurrent() {
     await router.push('/login')
     logoutCurrentPending.value = false
   }
+}
+
+async function unblockBlockedUser(targetUserId) {
+  if (!targetUserId) return
+
+  blockedUsersError.value = ''
+  try {
+    await userStore.unblockUser(targetUserId)
+  } catch (errorValue) {
+    const apiError = await handleApiError(errorValue, { notify: false })
+    blockedUsersError.value = toPublicErrorMessage(apiError, 'Ошибка при разблокировке пользователя')
+  }
+}
+
+function resolveAvatar(path) {
+  return resolveUrl(path)
 }
 
 function goToEdit() {
@@ -295,6 +323,46 @@ function resolveUrl(path) {
               </ul>
 
               <div v-else-if="!sessionsError" class="text-secondary">Список устройств пуст.</div>
+            </div>
+          </div>
+
+          <div v-if="isOwnProfile" class="card border-0 shadow-sm rounded-4 mb-4">
+            <div class="card-body">
+              <div class="d-flex align-items-center justify-content-between gap-3 mb-3">
+                <h3 class="h5 fw-semibold mb-0">Заблокированные пользователи</h3>
+                <span class="badge rounded-pill text-bg-light border text-secondary">{{ blockedUsers.length }}</span>
+              </div>
+
+              <p v-if="blockedUsersError" class="alert alert-danger mb-3">{{ blockedUsersError }}</p>
+
+              <div v-if="!blockedUsers.length" class="text-secondary">Список пуст.</div>
+
+              <ul v-else class="list-group list-group-flush">
+                <li v-for="item in blockedUsers" :key="`${item.targetUserId}-${item.user?.id ?? item.user?.username}`" class="list-group-item px-0 py-3">
+                  <div class="d-flex align-items-center justify-content-between gap-3">
+                    <router-link :to="`/users/${item.targetUserId}`" class="d-flex align-items-center gap-3 text-body text-decoration-none min-w-0 flex-grow-1">
+                      <div class="rounded-circle overflow-hidden flex-shrink-0 bg-body-secondary border d-flex align-items-center justify-content-center" style="width: 42px; height: 42px;">
+                        <img
+                          v-if="item.user?.avatarUrl"
+                          :src="resolveAvatar(item.user.avatarUrl)"
+                          alt="avatar"
+                          class="w-100 h-100"
+                          style="object-fit: cover;"
+                        />
+                        <span v-else class="fw-semibold text-secondary">{{ (item.user?.username || String(item.targetUserId || '?')).charAt(0).toUpperCase() }}</span>
+                      </div>
+
+                      <div class="min-w-0 flex-grow-1">
+                        <div class="fw-semibold text-truncate">{{ item.user?.username || `Пользователь #${item.targetUserId}` }}</div>
+                        <div class="small text-secondary text-truncate">ID: {{ item.targetUserId }}</div>
+                        <div class="small text-secondary">Заблокирован: {{ timeAgo(item.createdAt) }}</div>
+                      </div>
+                    </router-link>
+
+                    <button type="button" class="btn btn-sm btn-outline-danger rounded-pill flex-shrink-0" @click="unblockBlockedUser(item.targetUserId)">Разблокировать</button>
+                  </div>
+                </li>
+              </ul>
             </div>
           </div>
 

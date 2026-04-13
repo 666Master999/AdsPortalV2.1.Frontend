@@ -15,11 +15,27 @@ export function useMediaViewer({ buildUrl, isVideoAttachment }) {
   let gesture = null
 
   const currentAttachment = computed(() => attachments.value[index.value] || null)
-  const currentUrl = computed(() => buildUrl(currentAttachment.value))
-  const currentIsVideo = computed(() => isVideoAttachment(currentAttachment.value))
+  const currentRawAttachment = computed(() => {
+    const a = attachments.value[index.value]
+    return a && typeof a === 'object' && ('original' in a) && a.original ? a.original : a
+  })
+  const currentUrl = computed(() => buildUrl(currentRawAttachment.value))
+  const currentIsVideo = computed(() => isVideoAttachment(currentRawAttachment.value))
+
   const imageStyle = computed(() => ({
     transform: `translate(-50%, -50%) translate3d(${panX.value}px, ${panY.value}px, 0) scale(${zoom.value})`,
     cursor: zoom.value > 1 ? 'grab' : 'zoom-in'
+  }))
+
+  // Slide-style transform (no centering translate) for horizontal track layout
+  const slideStyle = computed(() => ({
+     transform: `translate3d(0,0,0)`,
+     transition: `transform ${transitionMs}ms ease`,
+     transformOrigin: 'center center',
+     maxWidth: '100%',
+     maxHeight: '100%',
+     width: 'auto',
+     height: 'auto'
   }))
 
   const clamp = (v, lo, hi) => Math.min(hi, Math.max(lo, v))
@@ -112,7 +128,7 @@ export function useMediaViewer({ buildUrl, isVideoAttachment }) {
       if (!f || !s) return
       gesture = { type: 'pinch', pointerIds: [fId, sId], startDistance: Math.hypot(f.x - s.x, f.y - s.y) || 1, startZoom: zoom.value, startPanX: panX.value, startPanY: panY.value }
     }
-    e.currentTarget.setPointerCapture?.(e.pointerId)
+    try { (e.target || e.currentTarget)?.setPointerCapture?.(e.pointerId) } catch {}
   }
 
   function onPointerMove(e) {
@@ -143,7 +159,7 @@ export function useMediaViewer({ buildUrl, isVideoAttachment }) {
   function onPointerEnd(e) {
     if (!message.value) return
     pointers.delete(e.pointerId); pointerStarts.delete(e.pointerId); pointerMoved.delete(e.pointerId)
-    e.currentTarget.releasePointerCapture?.(e.pointerId)
+    try { (e.target || e.currentTarget)?.releasePointerCapture?.(e.pointerId) } catch {}
     if (!pointers.size) { gesture = null; return }
     if (pointers.size === 1) {
       const [rid, rpos] = pointers.entries().next().value
@@ -161,13 +177,30 @@ export function useMediaViewer({ buildUrl, isVideoAttachment }) {
   }
 
   watch(message, (v) => {
-    if (v) window.addEventListener('keydown', onKeydown)
-    else window.removeEventListener('keydown', onKeydown)
+    if (v) {
+      window.addEventListener('keydown', onKeydown)
+      // capture wheel and pointer events globally so overlay can be pointer-events:none
+      window.addEventListener('wheel', onWheel, { passive: false })
+      window.addEventListener('pointerdown', onPointerDown, true)
+      window.addEventListener('pointermove', onPointerMove, true)
+      window.addEventListener('pointerup', onPointerEnd, true)
+      window.addEventListener('pointercancel', onPointerEnd, true)
+      window.addEventListener('click', onClick, true)
+    } else {
+      window.removeEventListener('keydown', onKeydown)
+      window.removeEventListener('wheel', onWheel, { passive: false })
+      window.removeEventListener('pointerdown', onPointerDown, true)
+      window.removeEventListener('pointermove', onPointerMove, true)
+      window.removeEventListener('pointerup', onPointerEnd, true)
+      window.removeEventListener('pointercancel', onPointerEnd, true)
+      window.removeEventListener('click', onClick, true)
+    }
   })
 
   return {
     viewport, message, attachments, index,
     currentAttachment, currentUrl, currentIsVideo, imageStyle,
+    slideStyle,
     open, close, switchTo,
     previous: () => switchTo(-1),
     next: () => switchTo(1),

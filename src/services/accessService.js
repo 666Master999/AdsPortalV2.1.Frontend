@@ -39,6 +39,14 @@ export function createAccessService(userStore) {
     return Boolean(store?.hasRestriction?.(restrictionType))
   }
 
+  function isUserBlocked(targetUserId) {
+    return Boolean(store?.isUserBlocked?.(targetUserId))
+  }
+
+  function isBlockedByUser(targetUserId) {
+    return Boolean(store?.isBlockedByUser?.(targetUserId))
+  }
+
   function getRestrictionReason(restrictionType, fallback = '') {
     const reason = store?.getRestriction?.(restrictionType)?.reason
     return String(reason || fallback).trim()
@@ -98,7 +106,15 @@ export function createAccessService(userStore) {
     if (rateLimitReason) return rateLimitReason
 
     if (hasRestriction('ChatBan')) {
-      return getRestrictionReason('ChatBan', 'Отправка сообщений ограничена (ChatBan).')
+      return 'Вам запрещено отправлять сообщения'
+    }
+
+    if (isUserBlocked(targetUserId)) {
+      return 'Вы заблокировали пользователя'
+    }
+
+    if (isBlockedByUser(targetUserId)) {
+      return 'Пользователь заблокировал вас'
     }
 
     return ''
@@ -116,6 +132,8 @@ export function createAccessService(userStore) {
     hasPermission,
     hasAnyPermission,
     hasRestriction,
+    isUserBlocked,
+    isBlockedByUser,
     canCreateAd,
     canSendMessage,
     canModerate,

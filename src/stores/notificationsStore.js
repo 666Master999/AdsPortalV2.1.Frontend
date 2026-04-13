@@ -12,6 +12,51 @@ const apiBase = getApiBaseUrl()
 export const useNotificationsStore = defineStore('notifications', () => {
   const notifications = ref([])
   const unreadCount = computed(() => notifications.value.filter(n => !n.isRead).length)
+  const notificationEntries = computed(() => {
+    const items = Array.isArray(notifications.value) ? notifications.value : []
+    const groups = new Map()
+
+    for (const notification of items) {
+      const adId = Number(notification?.adId ?? notification?.data?.adId)
+      const key = Number.isFinite(adId) && adId > 0 ? `ad:${adId}` : `id:${notification.id}`
+      if (!groups.has(key)) groups.set(key, [])
+      groups.get(key).push(notification)
+    }
+
+    const entries = []
+
+    for (const [key, list] of groups) {
+      const first = list[0]
+      const adId = Number(first?.adId ?? first?.data?.adId)
+
+      if (Number.isFinite(adId) && adId > 0 && list.length > 1) {
+        entries.push({
+          key,
+          type: 'NotificationGroup',
+          adId,
+          notificationIds: list.map(item => item.id),
+          isRead: list.every(item => item.isRead),
+          createdAt: first.createdAt,
+          preview: first.preview,
+          data: { count: list.length },
+        })
+        continue
+      }
+
+      entries.push({
+        key: `id:${first.id}`,
+        type: first.type,
+        adId: Number.isFinite(adId) && adId > 0 ? adId : null,
+        notificationIds: [first.id],
+        isRead: first.isRead,
+        createdAt: first.createdAt,
+        preview: first.preview,
+        data: first.data,
+      })
+    }
+
+    return entries
+  })
 
   let connection = null
 
@@ -299,5 +344,5 @@ export const useNotificationsStore = defineStore('notifications', () => {
     }
   }
 
-  return { notifications, unreadCount, fetchNotifications, markRead, connect, disconnect, mapNotificationToView }
+  return { notifications, unreadCount, notificationEntries, fetchNotifications, markRead, connect, disconnect, mapNotificationToView }
 })

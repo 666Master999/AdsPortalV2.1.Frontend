@@ -93,7 +93,8 @@ function hasPatchResultShape(data) {
 
 function buildAdsQueryString(params = {}) {
   const query = new URLSearchParams()
-  query.set('page', String(normalizePage(params.page)))
+  const hasCursor = params && params.cursor != null && String(params.cursor).trim() !== ''
+  if (!hasCursor) query.set('page', String(normalizePage(params.page)))
   query.set('pageSize', String(clampPageSize(params.pageSize)))
 
   const sortValue = normalizeSortValue(params)
@@ -109,6 +110,11 @@ function buildAdsQueryString(params = {}) {
   appendQueryValue(query, 'status', normalizeStatusFilterValue(params.status))
   appendQueryValue(query, 'type', params.type)
   appendQueryValues(query, 'location', params.location)
+
+  // Cursor-based pagination support: include cursor and avoid page when using cursor
+  if (hasCursor) {
+    query.set('cursor', String(params.cursor).trim())
+  }
 
   return query.toString()
 }
@@ -200,7 +206,7 @@ export const useAdsStore = defineStore('ads', () => {
   const totalCount = ref(0)
   const page = ref(DEFAULT_PAGE)
   const pageSize = ref(DEFAULT_PAGE_SIZE)
-  const totalPages = ref(0)
+  const totalPages = ref(null)
   const isLoading = ref(false)
 
   let _currentRequestId = 0
@@ -240,14 +246,34 @@ export const useAdsStore = defineStore('ads', () => {
 
         const { items, total } = extractList(data)
         const mappedItems = mapAdListDtoToViewModel(items)
-        ads.value = mappedItems
-        totalCount.value = normalizeTotalCount(data.totalCount ?? data.total ?? total, total)
-        page.value = normalizePage(data.page ?? data.Page ?? pageValue)
+
+        const hasCursor = params && params.cursor != null && String(params.cursor).trim() !== ''
+        const shouldAppend = Boolean(params && params.append)
+
+        if (shouldAppend) {
+          ads.value = [...ads.value, ...mappedItems]
+        } else {
+          ads.value = mappedItems
+        }
+
+        // Only update totalCount when not using cursor-based request
+        if (!hasCursor) {
+          totalCount.value = normalizeTotalCount(data.totalCount ?? data.total ?? total, total)
+        }
+
+        if (!hasCursor) {
+          page.value = normalizePage(data.page ?? data.Page ?? pageValue)
+        }
         pageSize.value = clampPageSize(data.pageSize ?? data.PageSize ?? pageSizeValue)
-        totalPages.value = normalizeNonNegativeInteger(
-          data.totalPages ?? data.TotalPages,
-          pageSize.value > 0 ? Math.ceil(totalCount.value / pageSize.value) : 0
-        )
+        totalPages.value = hasCursor
+          ? null
+          : normalizeNonNegativeInteger(
+            data.totalPages ?? data.TotalPages,
+            pageSize.value > 0 ? Math.ceil((totalCount.value || 0) / pageSize.value) : 0
+          )
+
+        // Return raw data so callers can access cursor/nextCursor
+        return data
       } catch (error) {
         if (requestId !== _currentRequestId || error?.name === 'AbortError') return
         ads.value = []
@@ -378,7 +404,13 @@ export const useAdsStore = defineStore('ads', () => {
     const index = ads.value.findIndex(item => String(item.id) === String(adId))
     if (index !== -1) {
       if (mapped && mapped.id != null && String(mapped.id) === String(adId)) {
-        ads.value[index] = { ...ads.value[index], ...mapped }
+        // Merge mapped fields but preserve existing owner/user when server returned a thin DTO
+        ads.value[index] = {
+          ...ads.value[index],
+          ...mapped,
+          owner: mapped.owner ?? ads.value[index].owner,
+          user: mapped.user ?? ads.value[index].user,
+        }
       } else {
         ads.value[index] = {
           ...ads.value[index],
@@ -390,7 +422,13 @@ export const useAdsStore = defineStore('ads', () => {
 
     if (selectedAd.value?.id && String(selectedAd.value.id) === String(adId)) {
       if (mapped && mapped.id != null && String(mapped.id) === String(adId)) {
-        selectedAd.value = { ...selectedAd.value, ...mapped }
+        // Merge mapped fields but keep existing owner/user if missing in mapped
+        selectedAd.value = {
+          ...selectedAd.value,
+          ...mapped,
+          owner: mapped.owner ?? selectedAd.value.owner,
+          user: mapped.user ?? selectedAd.value.user,
+        }
       } else {
         selectedAd.value = {
           ...selectedAd.value,
