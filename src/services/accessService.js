@@ -106,15 +106,15 @@ export function createAccessService(userStore) {
     if (rateLimitReason) return rateLimitReason
 
     if (hasRestriction('ChatBan')) {
-      return 'Вам запрещено отправлять сообщения'
+      return 'Для вашего аккаунта отключена отправка сообщений'
     }
 
     if (isUserBlocked(targetUserId)) {
-      return 'Вы заблокировали пользователя'
+      return 'Вы ограничили сообщения от этого пользователя'
     }
 
     if (isBlockedByUser(targetUserId)) {
-      return 'Пользователь заблокировал вас'
+      return 'Собеседник ограничил вам отправку сообщений'
     }
 
     return ''

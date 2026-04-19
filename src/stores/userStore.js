@@ -1009,6 +1009,7 @@ export const useUserStore = defineStore('user', () => {
     revokeSession,
     fetchPublicProfile,
     fetchProfile,
+    fetchProfileDeduped,
     uploadAvatar,
     updateProfile,
     getFavorites,

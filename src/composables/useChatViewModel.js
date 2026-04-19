@@ -150,8 +150,16 @@ function normalizeConversationItem(conversation, isSelected = false) {
   const lastMessage = conversation.lastMessage ?? null
   const type = String(lastMessage?.type ?? conversation.lastMessageType ?? '').toLowerCase()
   const lastMessageText = lastMessage?.text ?? conversation.lastMessageText ?? ''
-  const displayTitle = conversation.companion?.name || conversation.ad?.title || `Разговор #${id}`
-  const subtitle = conversation.ad?.title || (conversation.ad?.id != null ? `Объявление #${conversation.ad.id}` : '')
+  const companionDisplay = conversation.companion?.name
+    || conversation.companion?.userName
+    || conversation.companion?.userLogin
+    || conversation.companionName
+    || `Разговор #${id}`
+  const companionLogin = conversation.companion?.userLogin
+    || conversation.companion?.userName
+    || conversation.companionLogin
+    || null
+  const adDisplay = conversation.ad?.title || (conversation.ad?.id != null ? `Объявление #${conversation.ad.id}` : '')
   const previewLabel = type === 'image' || type === 'photo'
     ? '📷 Вложение'
     : type === 'file' || type === 'document'
@@ -162,14 +170,18 @@ function normalizeConversationItem(conversation, isSelected = false) {
   return {
     id,
     selected: Boolean(isSelected),
-    title: displayTitle,
-    subtitle,
+    title: adDisplay || companionDisplay,
+    subtitle: companionDisplay,
     previewLabel,
     previewUrl,
     timeLabel: chatTime(conversation.lastMessageAt),
     unreadCount: Number(conversation.unreadCount ?? 0) || 0,
-    avatarUrl: buildUrl(conversation.ad?.mainImagePath),
-    initial: getInitial(conversation.companion?.name || conversation.ad?.title, id),
+    isMuted: Boolean(conversation.isMuted ?? conversation.muted),
+    isArchived: Boolean(conversation.isArchived ?? conversation.archived),
+    companionId: conversation.companion?.id ?? null,
+    companionLogin,
+    avatarUrl: buildUrl(conversation.ad?.mainImagePath || conversation.ad?.image || conversation.mainImagePath || null),
+    initial: getInitial(adDisplay || companionDisplay, id),
     source: conversation,
   }
 }
@@ -253,7 +265,7 @@ function buildMessageItem(message, context = {}, lookup = new Map()) {
       : 'border-bottom-left-radius: 0.2rem !important;',
     contentStyle: audioAttachments.length
       ? 'width: 100%; max-width: min(96vw, 520px);'
-      : 'min-width: 140px; width: fit-content; max-width: min(72%, 620px);',
+      : 'min-width: 140px; width: fit-content; max-width: min(82vw, 620px);',
     mediaAttachments,
     audioAttachments,
     fileAttachments,
@@ -443,8 +455,10 @@ export function useChatViewModel() {
     if (!user) return null
     return {
       id: user.id,
-      name: user.name ?? null,
+      name: user.name ?? user.userName ?? user.userLogin ?? null,
       avatar: buildUrl(user.avatarPath),
+      userName: user.userName ?? null,
+      userLogin: user.userLogin ?? null,
       lastActivityAt: user.lastActivityAt ? new Date(Date.parse(user.lastActivityAt) + 3 * 3600 * 1000).toISOString() : null,
       isOnline: user.isOnline ?? null,
     }
@@ -491,7 +505,7 @@ export function useChatViewModel() {
   const lastSeenClass = computed(() => {
     if (!presenceStore.isPresenceReady) return 'text-secondary'
     if (companionTyping.value) return 'text-primary'
-    if (companionInDialog.value) return 'text-dialog'
+    if (companionInDialog.value) return ''
     if (presenceStore.isOnline(companion.value?.id)) return 'text-success'
     return 'text-secondary'
   })

@@ -619,7 +619,7 @@ export const useChatStore = defineStore('chat', () => {
     return conversations.value.find(c => `${c.ad?.id ?? c.adId ?? c.relatedAdId ?? c.targetAdId ?? ''}` === id) || null
   }
 
-  async function sendMessageByAdId(adIdVal, text, attachments = []) {
+  async function sendMessageByAdId(adIdVal, text, attachments = [], replyToMessageId = null) {
     const tempId = `temp-${Date.now()}-${++_tempSeq}`
     const clientTag = createClientTag()
     const myUserId = _getCurrentUserId()
@@ -631,6 +631,7 @@ export const useChatStore = defineStore('chat', () => {
       authorId: myUserId,
       createdAt: new Date().toISOString(),
       attachments: Array.isArray(attachments) ? attachments : [],
+      replyToMessageId,
       status: 'sending',
       clientTag,
       ad: adIdVal != null ? { id: adIdVal } : null,
@@ -646,7 +647,7 @@ export const useChatStore = defineStore('chat', () => {
     }, OPTIMISTIC_DELAY)
 
     try {
-      const response = await postMessage(`/conversations/by-ad/${adIdVal}/messages`, { text, attachments, clientTag })
+      const response = await postMessage(`/conversations/by-ad/${adIdVal}/messages`, { text, attachments, clientTag, replyToMessageId })
       const message = normalizeMessage(validateMessageDto(response, { strict: false }))
       const conversationId = message?.conversationId || response?.conversation?.id || response?.conversation?.conversationId
       if (!conversationId) throw new Error('Invalid response from server')
@@ -694,7 +695,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       let response
       if (adIdVal && !cid) {
-        response = await postMessage(`/conversations/by-ad/${adIdVal}/messages`, { text: msg.text, attachments: msg.attachments, clientTag })
+        response = await postMessage(`/conversations/by-ad/${adIdVal}/messages`, { text: msg.text, attachments: msg.attachments, clientTag, replyToMessageId: msg.replyToMessageId ?? null })
         const real = normalizeMessage(validateMessageDto(response, { strict: false }))
         const conversationId = real?.conversationId || response?.conversation?.id
         if (conversationId) {
@@ -718,7 +719,7 @@ export const useChatStore = defineStore('chat', () => {
         if (!isNaN(id) && (lastKnownId.value === null || id > lastKnownId.value)) lastKnownId.value = id
         return conversationId ? { conversationId } : null
       } else {
-        response = await postMessage(`/conversations/${cid}/messages`, { text: msg.text, attachments: msg.attachments, clientTag })
+        response = await postMessage(`/conversations/${cid}/messages`, { text: msg.text, attachments: msg.attachments, clientTag, replyToMessageId: msg.replyToMessageId ?? null })
         const real = normalizeMessage(validateMessageDto(response, { strict: false }))
         if (real) {
           setMessage(real)
@@ -923,7 +924,7 @@ export const useChatStore = defineStore('chat', () => {
   let _tempSeq = 0
   const OPTIMISTIC_DELAY = 120
 
-  async function sendMessage(text, attachments = []) {
+  async function sendMessage(text, attachments = [], replyToMessageId = null) {
     const cid = currentConversationId.value
     if (!cid) throw new Error('No active conversation')
 
@@ -938,6 +939,7 @@ export const useChatStore = defineStore('chat', () => {
       authorId: myUserId,
       createdAt: new Date().toISOString(),
       attachments: Array.isArray(attachments) ? attachments : [],
+      replyToMessageId,
       status: 'sending',
       clientTag,
     }
@@ -951,7 +953,7 @@ export const useChatStore = defineStore('chat', () => {
     }, OPTIMISTIC_DELAY)
 
     try {
-      const response = await postMessage(`/conversations/${cid}/messages`, { text, attachments, clientTag })
+      const response = await postMessage(`/conversations/${cid}/messages`, { text, attachments, clientTag, replyToMessageId })
       const real = normalizeMessage(validateMessageDto(response, { strict: false }))
 
       clearTimeout(timer)
@@ -977,14 +979,17 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   async function editMessage(conversationId, messageId, patch = {}) {
-    const requestBody = validateApiRequestBody('patch', `/conversations/${conversationId}/messages/${messageId}`, patch)
+    const requestBody = validateApiRequestBody('patch', `/conversations/${conversationId}/messages/${messageId}`, {
+      text: patch?.text ?? null,
+    })
 
     const updated = normalizeMessage(validateMessageDto(await fetchJSON(`/conversations/${conversationId}/messages/${messageId}`, {
       method: 'PATCH',
       headers: authHeaders(),
-      //body: JSON.stringify(requestBody),
+      body: JSON.stringify(requestBody),
     }), { strict: true }))
     updateMessage(messageId, updated)
+    try { syncConversationAfterMessage(String(conversationId ?? ''), updated) } catch {}
     return updated
   }
 

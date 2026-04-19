@@ -7,6 +7,7 @@ import { apiClient } from '../api/apiClient'
 import { mapAdListDtoToViewModel } from '../features/ads/model/adMapper'
 import { getModerationStatusClass, getModerationStatusLabel } from '@/utils/moderationStatus'
 import { resolveMediaUrl } from '../utils/resolveMediaUrl'
+import Pagination from '../components/Pagination.vue'
 
 const route = useRoute()
 const access = useAccessService()
@@ -14,16 +15,45 @@ const access = useAccessService()
 const ads = ref([])
 const users = ref([])
 const logs = ref([])
+const deadletters = ref([])
+const outboxItems = ref([])
 const isLoading = ref(false)
 const error = ref('')
 const adsMeta = ref({ total: 0, page: 1, pageSize: 20, totalPages: 0, paged: true })
 const usersMeta = ref({ total: 0, page: 1, pageSize: 20, totalPages: 0, paged: true })
 const logsMeta = ref({ total: 0, page: 1, pageSize: 20, totalPages: 0, paged: true })
+const deadlettersMeta = ref({ items: [], total: 0, page: 1, pageSize: 0, totalPages: 0, paged: false })
+const outboxMeta = ref({ items: [], total: 0, page: 1, pageSize: 0, totalPages: 0, paged: false })
 const TAKE = 20
+const DEFAULT_ADMIN_ADS_PAGE_SIZE = 20
+const ADMIN_ADS_PAGE_SIZES = [20, 50]
+const ADMIN_ADS_STATUS_OPTIONS = ['active', 'pendingModeration', 'rejected', 'deleted']
+const ADMIN_ADS_SORT_OPTIONS = [
+  { value: '', label: 'Сначала новые' },
+  { value: 'reports', label: 'По жалобам' },
+]
 const userActionId = ref('')
 const adActionId = ref('')
-const loadedTabs = reactive({ ads: false, users: false, logs: false })
+const deadletterActionId = ref('')
+const outboxActionId = ref('')
+const loadedTabs = reactive({ ads: false, users: false, logs: false, deadletters: false, outbox: false })
 const LOGIN_BAN_TYPE = 'LoginBan'
+const adminAdsQuery = reactive({
+  page: 1,
+  pageSize: DEFAULT_ADMIN_ADS_PAGE_SIZE,
+  status: [],
+  sort: '',
+})
+
+const deadletterBulkCount = ref(50)
+const deadletterBulkInProgress = ref(false)
+const deadletterFilterEventType = ref('')
+const deadletterFilterMaxAttemptCount = ref(null)
+const outboxFilterStatus = ref('')
+const outboxFilterCorrelationId = ref('')
+const outboxFilterEventType = ref('')
+const outboxSummary = ref(null)
+const outboxSummaryInProgress = ref(false)
 
 function normalizeTab(tab) {
   const value = String(tab || 'ads')
@@ -40,6 +70,91 @@ const activeTab = computed(() => {
 
 function hasMore(meta) {
   return Boolean(meta?.paged && meta.page < meta.totalPages)
+}
+
+function normalizePositiveInteger(value, fallback = 1) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback
+}
+
+function clampAdminAdsPageSize(value) {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed <= 0) return DEFAULT_ADMIN_ADS_PAGE_SIZE
+  return Math.min(parsed, 50)
+}
+
+function normalizeAdminAdsSort(value) {
+  const normalized = String(value ?? '').trim().toLowerCase()
+  if (normalized === 'reports' || normalized === 'reports_desc') return 'reports'
+  return ''
+}
+
+function buildAdminAdsQueryString() {
+  const query = new URLSearchParams()
+  query.set('page', String(normalizePositiveInteger(adminAdsQuery.page, 1)))
+  query.set('pageSize', String(clampAdminAdsPageSize(adminAdsQuery.pageSize)))
+
+  if (adminAdsQuery.status.length) {
+    query.set('status', adminAdsQuery.status.join(','))
+  }
+
+  const sort = normalizeAdminAdsSort(adminAdsQuery.sort)
+  if (sort) {
+    query.set('sort', sort)
+  }
+
+  return query.toString()
+}
+
+function isAdminAdsStatusSelected(status) {
+  return adminAdsQuery.status.includes(status)
+}
+
+function toggleAdminAdsStatus(status) {
+  const normalized = String(status || '').trim()
+  if (!ADMIN_ADS_STATUS_OPTIONS.includes(normalized)) return
+
+  const next = new Set(adminAdsQuery.status)
+  if (next.has(normalized)) next.delete(normalized)
+  else next.add(normalized)
+
+  adminAdsQuery.status = ADMIN_ADS_STATUS_OPTIONS.filter(item => next.has(item))
+  adminAdsQuery.page = 1
+  void loadActiveTab({ force: true })
+}
+
+function setAdminAdsSort(value) {
+  const nextSort = normalizeAdminAdsSort(value)
+  if (nextSort === adminAdsQuery.sort) return
+
+  adminAdsQuery.sort = nextSort
+  adminAdsQuery.page = 1
+  void loadActiveTab({ force: true })
+}
+
+function setAdminAdsPage(value) {
+  const nextPage = normalizePositiveInteger(value, 1)
+  if (nextPage === adminAdsQuery.page) return
+
+  adminAdsQuery.page = nextPage
+  void loadActiveTab({ force: true })
+}
+
+function setAdminAdsPageSize(value) {
+  const nextPageSize = clampAdminAdsPageSize(value)
+  if (nextPageSize === adminAdsQuery.pageSize) return
+
+  adminAdsQuery.pageSize = nextPageSize
+  adminAdsQuery.page = 1
+  void loadActiveTab({ force: true })
+}
+
+function resetAdminAdsFilters() {
+  adminAdsQuery.status = []
+  adminAdsQuery.sort = ''
+  adminAdsQuery.page = 1
+  adminAdsQuery.pageSize = DEFAULT_ADMIN_ADS_PAGE_SIZE
+  void loadActiveTab({ force: true })
 }
 
 const imagePlaceholder =
@@ -150,7 +265,9 @@ async function runAdAction(ad, config) {
       errorHandlerOptions: { notify: false },
     })
 
-    if (config.patch) {
+    if (activeTab.value === 'ads') {
+      await loadActiveTab({ force: true })
+    } else if (config.patch) {
       updateAdAfterModeration(adId, config.patch)
     }
   } catch (ex) {
@@ -280,6 +397,10 @@ function getAdminTabEndpoint(tab) {
       return 'users'
     case 'logs':
       return 'logs'
+    case 'outbox':
+      return 'outbox'
+    case 'deadletters':
+      return 'deadletters'
     default:
       return ''
   }
@@ -342,15 +463,30 @@ async function loadActiveTab(options = {}) {
 
   error.value = ''
 
-  if (!endpoint || (!force && loadedTabs[tab])) return
+  if (!endpoint) return
+  if (tab !== 'ads' && !force && loadedTabs[tab]) return
 
   isLoading.value = true
 
   try {
     let data
 
-    if (tab === 'ads' && !canAccessAdmin.value && canModerateAds.value) {
-      data = await apiClient.get('/ads/moderation', {
+    if (tab === 'ads') {
+      data = await apiClient.get(`/admin/ads?${buildAdminAdsQueryString()}`, {
+        errorHandlerOptions: { notify: false },
+      })
+    } else if (tab === 'deadletters') {
+      data = await apiClient.get(`/admin/deadletters`, {
+        errorHandlerOptions: { notify: false },
+      })
+    } else if (tab === 'outbox') {
+      const params = new URLSearchParams()
+      params.set('page', '1')
+      params.set('pageSize', String(TAKE))
+      if (outboxFilterStatus.value) params.set('status', String(outboxFilterStatus.value))
+      if (outboxFilterCorrelationId.value) params.set('correlationId', String(outboxFilterCorrelationId.value))
+      if (outboxFilterEventType.value) params.set('eventType', String(outboxFilterEventType.value))
+      data = await apiClient.get(`/admin/outbox?${params.toString()}`, {
         errorHandlerOptions: { notify: false },
       })
     } else {
@@ -364,6 +500,8 @@ async function loadActiveTab(options = {}) {
     if (tab === 'ads') {
       const mappedItems = mapAdListDtoToViewModel(items)
       ads.value = mappedItems
+      adminAdsQuery.page = page
+      adminAdsQuery.pageSize = pageSize
       adsMeta.value = { total, page, pageSize, totalPages, paged }
     } else if (tab === 'users') {
       if (!canAccessAdmin.value) return
@@ -373,9 +511,21 @@ async function loadActiveTab(options = {}) {
       if (!canAccessAdmin.value) return
       logs.value = items
       logsMeta.value = { total, page, pageSize, totalPages, paged }
+    } else if (tab === 'deadletters') {
+      if (!canAccessAdmin.value) return
+      deadletters.value = items
+      deadlettersMeta.value = { items, total, page, pageSize, totalPages, paged }
+    } else if (tab === 'outbox') {
+      if (!canAccessAdmin.value) return
+      outboxItems.value = items
+      outboxMeta.value = { items, total, page, pageSize, totalPages, paged }
+      // Load summary when opening outbox
+      void loadOutboxSummary()
     }
 
-    loadedTabs[tab] = true
+    if (tab !== 'ads') {
+      loadedTabs[tab] = true
+    }
   } catch (ex) {
     error.value = toPublicErrorMessage(ex, 'Не удалось загрузить данные')
   } finally {
@@ -384,9 +534,9 @@ async function loadActiveTab(options = {}) {
 }
 
 async function loadMoreTab(tab) {
-  const endpointMap = { ads: 'ads', users: 'users', logs: 'logs' }
-  const listMap = { ads, users, logs }
-  const metaMap = { ads: adsMeta, users: usersMeta, logs: logsMeta }
+  const endpointMap = { users: 'users', logs: 'logs', outbox: 'outbox' }
+  const listMap = { users, logs, outbox: outboxItems }
+  const metaMap = { users: usersMeta, logs: logsMeta, outbox: outboxMeta }
   const endpoint = endpointMap[tab]
   const list = listMap[tab]
   const meta = metaMap[tab]
@@ -438,6 +588,80 @@ async function runUserRestrictionAction(userId, config) {
     error.value = toPublicErrorMessage(ex, config.errorMessage || 'Не удалось выполнить действие')
   } finally {
     userActionId.value = ''
+  }
+}
+
+async function retryDeadLetter(item) {
+  if (!item || deadletterActionId.value) return
+  deadletterActionId.value = String(item.id)
+  error.value = ''
+  try {
+    await apiClient.post(`/admin/deadletters/${item.id}/retry`, null, { errorHandlerOptions: { notify: false } })
+    await loadActiveTab({ force: true })
+  } catch (ex) {
+    error.value = toPublicErrorMessage(ex, 'Не удалось повторить сообщение')
+  } finally {
+    deadletterActionId.value = ''
+  }
+}
+
+async function downloadDeadLetterPayload(id) {
+  if (!id) return
+  error.value = ''
+  try {
+    const response = await apiClient.request(`/admin/deadletters/${id}/payload`, { method: 'GET', parseAs: 'raw', errorHandlerOptions: { notify: false } })
+    const blob = await response.blob()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `deadletter-${id}.json`
+    document.body.appendChild(a)
+    a.click()
+    a.remove()
+    URL.revokeObjectURL(url)
+  } catch (ex) {
+    error.value = toPublicErrorMessage(ex, 'Не удалось скачать payload')
+  }
+}
+
+async function retryDeadlettersBulk() {
+  if (deadletterBulkInProgress.value) return
+  const count = Number(deadletterBulkCount.value || 0)
+  if (!Number.isInteger(count) || count <= 0) {
+    error.value = 'Количество должно быть положительным'
+    return
+  }
+  const params = new URLSearchParams()
+  if (deadletterFilterEventType.value) params.set('eventType', String(deadletterFilterEventType.value))
+  const maxAttempt = Number(deadletterFilterMaxAttemptCount.value)
+  if (Number.isInteger(maxAttempt) && maxAttempt > 0) params.set('maxAttemptCount', String(maxAttempt))
+  const query = params.toString() ? `?${params.toString()}` : ''
+
+  deadletterBulkInProgress.value = true
+  error.value = ''
+  try {
+    const result = await apiClient.post(`/admin/deadletters/retry-bulk${query}`, count, { errorHandlerOptions: { notify: false } })
+    await loadActiveTab({ force: true })
+    const retried = result?.Retried ?? result?.retried ?? 0
+    error.value = `Retried: ${retried}`
+  } catch (ex) {
+    error.value = toPublicErrorMessage(ex, 'Не удалось выполнить bulk retry')
+  } finally {
+    deadletterBulkInProgress.value = false
+  }
+}
+
+async function loadOutboxSummary(windowSeconds = 60) {
+  if (outboxSummaryInProgress.value) return
+  outboxSummaryInProgress.value = true
+  error.value = ''
+  try {
+    const result = await apiClient.get(`/admin/outbox/summary?windowSeconds=${Number(windowSeconds)}`, { errorHandlerOptions: { notify: false } })
+    outboxSummary.value = result
+  } catch (ex) {
+    error.value = toPublicErrorMessage(ex, 'Не удалось загрузить сводку Outbox')
+  } finally {
+    outboxSummaryInProgress.value = false
   }
 }
 
@@ -495,6 +719,15 @@ watch(
             <li v-if="canAccessAdmin" class="nav-item">
               <router-link class="nav-link rounded-pill" :class="{ active: activeTab === 'logs' }" to="/admin?tab=logs">Логи</router-link>
             </li>
+            <li v-if="canAccessAdmin" class="nav-item">
+              <router-link class="nav-link rounded-pill" :class="{ active: activeTab === 'outbox' }" to="/admin?tab=outbox">Outbox</router-link>
+            </li>
+            <li v-if="canAccessAdmin" class="nav-item">
+              <router-link class="nav-link rounded-pill" :class="{ active: activeTab === 'deadletters' }" to="/admin?tab=deadletters">Очередь ошибок</router-link>
+            </li>
+            <li v-if="canAccessAdmin" class="nav-item">
+              <router-link class="nav-link rounded-pill" to="/admin/categories">Категории</router-link>
+            </li>
           </ul>
         </div>
 
@@ -504,7 +737,53 @@ watch(
 
           <section v-if="activeTab === 'ads'" class="card border-0 shadow-sm rounded-4 mb-4">
             <div class="card-body">
-              <h3 class="h5 mb-3 fw-semibold">Объявления</h3>
+              <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between gap-3 mb-3">
+                <h3 class="h5 mb-0 fw-semibold">Объявления</h3>
+                <div class="small text-secondary">Всего: {{ adsMeta.total }}</div>
+              </div>
+
+              <div class="border rounded-4 bg-body-tertiary p-3 mb-3 d-grid gap-3">
+                <div class="row g-3 align-items-end">
+                  <div class="col-12 col-xl-7">
+                    <label class="form-label small text-uppercase text-secondary fw-semibold mb-2">Статусы</label>
+                    <div class="d-flex flex-wrap gap-2">
+                      <button
+                        v-for="status in ADMIN_ADS_STATUS_OPTIONS"
+                        :key="status"
+                        type="button"
+                        class="btn btn-sm rounded-pill"
+                        :class="isAdminAdsStatusSelected(status) ? 'btn-dark' : 'btn-light border'"
+                        @click="toggleAdminAdsStatus(status)"
+                      >
+                        {{ formatModerationStatus(status) }}
+                      </button>
+                    </div>
+                  </div>
+
+                  <div class="col-12 col-md-6 col-xl-3">
+                    <label class="form-label small text-uppercase text-secondary fw-semibold mb-2">Сортировка</label>
+                    <select class="form-select rounded-pill" :value="adminAdsQuery.sort" @change="setAdminAdsSort($event.target.value)">
+                      <option v-for="option in ADMIN_ADS_SORT_OPTIONS" :key="option.value || 'default'" :value="option.value">
+                        {{ option.label }}
+                      </option>
+                    </select>
+                  </div>
+
+                  <div class="col-12 col-md-6 col-xl-2 d-flex align-items-end">
+                    <button type="button" class="btn btn-outline-secondary rounded-pill w-100" @click="resetAdminAdsFilters">
+                      Сбросить
+                    </button>
+                  </div>
+                </div>
+
+                <div class="d-flex flex-wrap align-items-center gap-2">
+                  <span v-if="adminAdsQuery.sort === 'reports'" class="badge rounded-pill text-bg-dark">Сортировка по жалобам</span>
+                  <span v-if="adminAdsQuery.status.length" class="badge rounded-pill text-bg-light border text-secondary">
+                    Статусов: {{ adminAdsQuery.status.length }}
+                  </span>
+                </div>
+              </div>
+
               <div class="list-group">
                 <div class="list-group-item list-group-item-action rounded-4 shadow-sm mb-2 border" v-for="ad in ads" :key="ad.id">
                   <div class="d-flex gap-3">
@@ -546,6 +825,7 @@ watch(
                         </div>
                         <div class="d-flex flex-wrap gap-2 justify-content-end">
                           <router-link :to="`/ads/${ad.id}`" class="btn btn-sm btn-primary">Просмотреть объявление</router-link>
+                          <router-link :to="`/ads/${ad.id}`" class="btn btn-sm btn-outline-dark" title="Открыть объявление для проверки жалоб">Жалобы</router-link>
                           <template v-if="canModerateAds">
                             <button class="btn btn-sm btn-outline-success" :disabled="adActionId === String(getAdId(ad))" @click="approveAd(ad)">Одобрить</button>
                             <button class="btn btn-sm btn-outline-danger" :disabled="adActionId === String(getAdId(ad))" @click="rejectAd(ad)">Отклонить</button>
@@ -558,12 +838,67 @@ watch(
                   </div>
                 </div>
               </div>
+
+              <p v-if="!ads.length && !isLoading" class="text-secondary small mb-0 mt-3">Объявления не найдены.</p>
             </div>
-            <div v-if="hasMore(adsMeta)" class="card-footer bg-transparent text-center border-top-0 pt-0">
-              <button class="btn btn-outline-secondary rounded-pill px-4" :disabled="isLoading" @click="loadMoreTab('ads')">
-                <span v-if="isLoading" class="spinner-border spinner-border-sm me-2" role="status"></span>
-                Загрузить ещё ({{ ads.length }} / {{ adsMeta.total }})
-              </button>
+            <div v-if="adsMeta.paged && adsMeta.totalPages > 1" class="card-footer bg-transparent border-top-0 pt-0">
+              <Pagination
+                :currentPage="adsMeta.page"
+                :totalPages="adsMeta.totalPages"
+                :totalCount="adsMeta.total"
+                :pageSize="adsMeta.pageSize"
+                :pageSizes="ADMIN_ADS_PAGE_SIZES"
+                @changePage="setAdminAdsPage"
+                @changePageSize="setAdminAdsPageSize"
+              />
+            </div>
+          </section>
+
+          <section v-if="canAccessAdmin && activeTab === 'deadletters'" class="card border-0 shadow-sm rounded-4 mb-4">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3 class="h5 mb-0 fw-semibold">Очередь ошибок</h3>
+                            <div class="d-flex gap-2 align-items-center">
+                              <input type="text" class="form-control form-control-sm" style="width:200px" v-model="deadletterFilterEventType" placeholder="eventType" />
+                              <input type="number" class="form-control form-control-sm" style="width:140px" v-model.number="deadletterFilterMaxAttemptCount" min="1" placeholder="max attempts" />
+                              <input type="number" class="form-control form-control-sm" style="width:120px" v-model.number="deadletterBulkCount" min="1" />
+                              <button class="btn btn-sm btn-outline-primary rounded-pill" :disabled="deadletterBulkInProgress" @click="retryDeadlettersBulk">
+                                <span v-if="deadletterBulkInProgress" class="spinner-border spinner-border-sm me-2" role="status"></span>
+                                Повторить пачку
+                              </button>
+                            </div>
+              </div>
+
+              <div class="list-group">
+                <div class="list-group-item list-group-item-action rounded-4 shadow-sm mb-2 border" v-for="dl in deadletters" :key="dl.id">
+                  <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+                    <div class="flex-grow-1">
+                      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                        <span class="badge bg-light text-dark border">{{ dl.eventType }}</span>
+                        <span class="small text-secondary">{{ formatDate(dl.createdAt) || '—' }}</span>
+                        <span class="small text-secondary">Попыток: {{ dl.attemptCount ?? 0 }}</span>
+                      </div>
+                      <div class="fw-semibold small text-truncate">{{ dl.payloadJson ? (dl.payloadJson.slice(0, 200) + (dl.payloadJson.length > 200 ? '…' : '')) : '—' }}</div>
+                      <div v-if="dl.error" class="small text-danger mt-1">{{ dl.error }}</div>
+                    </div>
+
+                    <div class="d-flex flex-column align-items-end gap-2">
+                      <div class="d-flex flex-wrap gap-2">
+                        <button class="btn btn-sm btn-outline-primary" @click="downloadDeadLetterPayload(dl.id)">Скачать payload</button>
+                        <button class="btn btn-sm btn-outline-success" :disabled="deadletterActionId === String(dl.id)" @click="retryDeadLetter(dl)">
+                          {{ deadletterActionId === String(dl.id) ? 'Выполнение...' : 'Повторить' }}
+                        </button>
+                      </div>
+                      <details class="flex-shrink-0 mt-2">
+                        <summary class="small text-secondary">Raw</summary>
+                        <pre class="mb-0 mt-2 small font-monospace">{{ JSON.stringify(dl, null, 2) }}</pre>
+                      </details>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <p v-if="!deadletters.length && !isLoading" class="text-secondary small mb-0 mt-3">Сообщений не найдено.</p>
             </div>
           </section>
 
@@ -623,6 +958,67 @@ watch(
                 <span v-if="isLoading" class="spinner-border spinner-border-sm me-2" role="status"></span>
                 Загрузить ещё ({{ users.length }} / {{ usersMeta.total }})
               </button>
+            </div>
+          </section>
+
+          <section v-if="canAccessAdmin && activeTab === 'outbox'" class="card border-0 shadow-sm rounded-4 mb-4">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-center mb-3">
+                <h3 class="h5 mb-0 fw-semibold">Outbox (статус)</h3>
+                <div class="d-flex gap-2 align-items-center">
+                  <input type="text" class="form-control form-control-sm" style="width:160px" v-model="outboxFilterStatus" placeholder="status" />
+                  <input type="text" class="form-control form-control-sm" style="width:200px" v-model="outboxFilterCorrelationId" placeholder="correlationId" />
+                  <input type="text" class="form-control form-control-sm" style="width:200px" v-model="outboxFilterEventType" placeholder="eventType" />
+                  <button class="btn btn-sm btn-outline-secondary rounded-pill" @click="() => { void loadActiveTab({ force: true }) }">Применить</button>
+                  <button class="btn btn-sm btn-outline-primary rounded-pill" :disabled="outboxSummaryInProgress" @click="() => { void loadOutboxSummary() }">
+                    <span v-if="outboxSummaryInProgress" class="spinner-border spinner-border-sm me-2" role="status"></span>
+                    Обновить сводку
+                  </button>
+                </div>
+              </div>
+
+              <div v-if="outboxSummary" class="mb-3">
+                <div class="row g-2">
+                  <div class="col-auto small text-secondary">PendingBacklog: <strong>{{ outboxSummary.PendingBacklog ?? outboxSummary.pendingBacklog ?? '—' }}</strong></div>
+                  <div class="col-auto small text-secondary">DeadLetterCount: <strong>{{ outboxSummary.DeadLetterCount ?? outboxSummary.deadLetterCount ?? '—' }}</strong></div>
+                  <div class="col-auto small text-secondary">AvgLatencyMs: <strong>{{ outboxSummary.AvgLatencyMs ?? outboxSummary.avgLatencyMs ?? '—' }}</strong></div>
+                  <div class="col-auto small text-secondary">P95LatencyMs: <strong>{{ outboxSummary.P95LatencyMs ?? outboxSummary.p95LatencyMs ?? '—' }}</strong></div>
+                  <div class="col-auto small text-secondary">ProcessedInWindow: <strong>{{ outboxSummary.ProcessedInWindow ?? outboxSummary.processedInWindow ?? '—' }}</strong></div>
+                  <div class="col-auto small text-secondary">ProcessedPerSecond: <strong>{{ outboxSummary.ProcessedPerSecond ?? outboxSummary.processedPerSecond ?? '—' }}</strong></div>
+                  <div class="col-auto small text-secondary">RetryRate: <strong>{{ outboxSummary.RetryRate ?? outboxSummary.retryRate ?? '—' }}</strong></div>
+                </div>
+              </div>
+
+              <div class="list-group">
+                <div class="list-group-item list-group-item-action rounded-4 shadow-sm mb-2 border" v-for="o in outboxItems" :key="o.id">
+                  <div class="d-flex flex-column flex-lg-row justify-content-between gap-3">
+                    <div class="flex-grow-1">
+                      <div class="d-flex flex-wrap gap-2 align-items-center mb-2">
+                        <span class="badge bg-light text-dark border">{{ o.eventType }}</span>
+                        <span class="small text-secondary">{{ formatDate(o.createdAt) || '—' }}</span>
+                        <span class="small text-secondary">Status: {{ o.status }}</span>
+                        <span class="small text-secondary">Attempts: {{ o.attemptCount ?? 0 }}</span>
+                      </div>
+                      <div class="fw-semibold small text-truncate">Correlation: {{ o.correlationId || '—' }} · Latency: {{ o.latencyMs ?? '—' }}ms</div>
+                      <div v-if="o.lastError" class="small text-danger mt-1">{{ o.lastError }}</div>
+                    </div>
+
+                    <div class="d-flex flex-column align-items-end gap-2">
+                      <details class="flex-shrink-0 mt-2">
+                        <summary class="small text-secondary">Raw</summary>
+                        <pre class="mb-0 mt-2 small font-monospace">{{ JSON.stringify(o, null, 2) }}</pre>
+                      </details>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
+              <div v-if="hasMore(outboxMeta)" class="card-footer bg-transparent text-center border-top-0 pt-0">
+                <button class="btn btn-outline-secondary rounded-pill px-4" :disabled="isLoading" @click="loadMoreTab('outbox')">
+                  <span v-if="isLoading" class="spinner-border spinner-border-sm me-2" role="status"></span>
+                  Загрузить ещё ({{ outboxItems.length }} / {{ outboxMeta.total }})
+                </button>
+              </div>
             </div>
           </section>
 

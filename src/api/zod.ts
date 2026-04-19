@@ -1,6 +1,31 @@
 import { makeApi, Zodios, type ZodiosOptions } from "@zodios/core";
 import { z } from "zod";
 
+type CategoryTreeDto = Partial<{
+  id: number;
+  name: string;
+  parentId: number | null;
+  isLeaf: boolean;
+  path: string | null;
+  attributes: Array<CategoryAttributeDto>;
+  children: Array<CategoryTreeDto>;
+}>;
+type CategoryAttributeDto = Partial<{
+  id: number;
+  categoryId: number;
+  slug: string;
+  name: string;
+  type: AttributeType;
+  isRequired: boolean;
+  isFilter: boolean;
+  options: Array<CategoryAttributeOptionDto>;
+}>;
+type AttributeType = "string" | "int" | "bool" | "decimal" | "enum";
+type CategoryAttributeOptionDto = Partial<{
+  id: number;
+  attributeId: number;
+  value: string;
+}>;
 type LocationTreeNodeDto = Partial<{
   id: number;
   name: string;
@@ -225,6 +250,9 @@ const AdListItemDtoPagedResultDto = z
     hasMore: z.boolean(),
   })
   .partial();
+const UpsertAdAttributeValueDto = z
+  .object({ attributeId: z.number().int(), value: z.string() })
+  .partial();
 const postAds_Body = z
   .object({
     Title: z.string(),
@@ -234,6 +262,7 @@ const postAds_Body = z
     CategoryId: z.number().int(),
     ListingType: z.string().optional(),
     LocationId: z.number().int(),
+    AttributeValues: z.array(UpsertAdAttributeValueDto).optional(),
     Files: z.array(z.instanceof(File)).optional(),
     files: z.array(z.instanceof(File)).optional(),
     mainImageIndex: z.number().int().optional(),
@@ -268,6 +297,15 @@ const AdOwnerDto = z
     lastActivityAt: z.string().datetime({ offset: true }),
   })
   .partial();
+const AttributeType = z.enum(["string", "int", "bool", "decimal", "enum"]);
+const AdAttributeValueDto = z
+  .object({
+    attributeId: z.number().int(),
+    name: z.string(),
+    type: AttributeType,
+    value: z.string(),
+  })
+  .partial();
 const AdDetailsDto = z
   .object({
     id: z.number().int(),
@@ -289,6 +327,7 @@ const AdDetailsDto = z
     category: AdCategoryDto,
     user: AdOwnerDto,
     images: z.array(AdImageDto),
+    attributeValues: z.array(AdAttributeValueDto),
     isFavorite: z.boolean(),
   })
   .partial();
@@ -342,15 +381,63 @@ const MeRestrictionDto = z
     reason: z.string().nullable(),
   })
   .partial();
+const CategoryAttributeOptionDto = z
+  .object({
+    id: z.number().int(),
+    attributeId: z.number().int(),
+    value: z.string(),
+  })
+  .partial();
+const CategoryAttributeDto = z
+  .object({
+    id: z.number().int(),
+    categoryId: z.number().int(),
+    slug: z.string(),
+    name: z.string(),
+    type: AttributeType,
+    isRequired: z.boolean(),
+    isFilter: z.boolean(),
+    options: z.array(CategoryAttributeOptionDto),
+  })
+  .partial();
 const CategoryDto = z
   .object({
     id: z.number().int(),
     name: z.string(),
     parentId: z.number().int().nullable(),
+    isLeaf: z.boolean(),
+    path: z.string().nullable(),
   })
   .partial();
-const UpsertCategoryDto = z
-  .object({ name: z.string(), parentId: z.number().int().nullable() })
+const UpsertCategoryDto = z.object({ name: z.string(), parentId: z.number().int().nullable() });
+const CategoryTreeDto: z.ZodType<CategoryTreeDto> = z.lazy(() =>
+  z
+    .object({
+      id: z.number().int(),
+      name: z.string(),
+      parentId: z.number().int().nullable(),
+      isLeaf: z.boolean(),
+      path: z.string().nullable(),
+      attributes: z.array(CategoryAttributeDto),
+      children: z.array(CategoryTreeDto),
+    })
+    .partial()
+);
+const UpsertCategoryAttributeDto = z.object({
+  slug: z.string(),
+  name: z.string(),
+  type: AttributeType,
+  isRequired: z.boolean(),
+  isFilter: z.boolean(),
+  options: z.array(z.string()).nullable(),
+});
+const CategoryViewDto = z
+  .object({
+    category: CategoryDto,
+    path: z.array(z.number().int()),
+    children: z.array(CategoryDto),
+    filters: z.array(CategoryAttributeDto),
+  })
   .partial();
 const CreateConversationRequest = z
   .object({ adId: z.number().int() })
@@ -368,6 +455,8 @@ const ConversationAdDto = z
     id: z.number().int(),
     title: z.string(),
     mainImagePath: z.string().nullable(),
+    price: z.number().nullable(),
+    isNegotiable: z.boolean(),
     status: AdStatus,
   })
   .partial();
@@ -419,8 +508,23 @@ const MessageAuthorDto = z
     avatarPath: z.string().nullable(),
   })
   .partial();
-const ChatAttachment = z
-  .object({ url: z.string(), type: MessageType })
+const ChatAttachmentDto = z
+  .object({
+    url: z.string(),
+    type: MessageType,
+    fileName: z.string().nullable(),
+    mimeType: z.string().nullable(),
+    size: z.number().int().nullable(),
+    thumbnailUrl: z.string().nullable(),
+  })
+  .partial();
+const ReplyPreviewDto = z
+  .object({
+    id: z.number().int(),
+    authorId: z.number().int(),
+    authorName: z.string().nullable(),
+    textSnippet: z.string().nullable(),
+  })
   .partial();
 const ConversationMessageDto = z
   .object({
@@ -431,11 +535,13 @@ const ConversationMessageDto = z
     author: MessageAuthorDto,
     createdAt: z.string().datetime({ offset: true }),
     text: z.string().nullable(),
-    attachments: z.array(ChatAttachment),
+    attachments: z.array(ChatAttachmentDto),
     replyToMessageId: z.number().int().nullable(),
+    replyPreview: ReplyPreviewDto,
     editedAt: z.string().datetime({ offset: true }).nullable(),
     deletedAt: z.string().datetime({ offset: true }).nullable(),
     clientTag: z.string().nullable(),
+    isRead: z.boolean(),
   })
   .partial();
 const ConversationMessagesDto = z
@@ -476,6 +582,9 @@ const postConversationsbyAdAdIdmessagesupload_Body = z
   })
   .partial()
   .passthrough();
+const ChatAttachment = z
+  .object({ url: z.string(), type: MessageType })
+  .partial();
 const EditMessageRequest = z
   .object({
     text: z.string().nullable(),
@@ -517,16 +626,15 @@ const LocationTreeNodeDto: z.ZodType<LocationTreeNodeDto> = z.lazy(() =>
     })
     .partial()
 );
-// Notification DTO updated: server now provides adTitle, mainImagePath and actorName
 const NotificationDto = z
   .object({
     id: z.number().int(),
     type: z.string(),
     isRead: z.boolean(),
     createdAt: z.string().datetime({ offset: true }),
-    reason: z.string().nullable(),
     adId: z.number().int().nullable(),
     adTitle: z.string().nullable(),
+    reason: z.string().nullable(),
     mainImagePath: z.string().nullable(),
     actorName: z.string().nullable(),
   })
@@ -641,10 +749,13 @@ export const schemas = {
   ModerationAdDto,
   AdListItemDto,
   AdListItemDtoPagedResultDto,
+  UpsertAdAttributeValueDto,
   postAds_Body,
   AdImageDto,
   CreateAdResultDto,
   AdOwnerDto,
+  AttributeType,
+  AdAttributeValueDto,
   AdDetailsDto,
   PatchResultDto,
   postAdsIdupload_Body,
@@ -656,8 +767,13 @@ export const schemas = {
   AuthRefreshResponseDto,
   AuthSessionDto,
   MeRestrictionDto,
+  CategoryAttributeOptionDto,
+  CategoryAttributeDto,
   CategoryDto,
   UpsertCategoryDto,
+  CategoryTreeDto,
+  UpsertCategoryAttributeDto,
+  CategoryViewDto,
   CreateConversationRequest,
   ConversationCompanionDto,
   ConversationAdDto,
@@ -666,13 +782,15 @@ export const schemas = {
   ConversationDto,
   ConversationActionDto,
   MessageAuthorDto,
-  ChatAttachment,
+  ChatAttachmentDto,
+  ReplyPreviewDto,
   ConversationMessageDto,
   ConversationMessagesDto,
   SendMessageRequest,
   ConversationMessageActionDto,
   postConversationsIdmessagesupload_Body,
   postConversationsbyAdAdIdmessagesupload_Body,
+  ChatAttachment,
   EditMessageRequest,
   postConversationsIdattachments_Body,
   ConversationStateDto,
@@ -708,6 +826,11 @@ const endpoints = makeApi([
       },
       {
         name: "status",
+        type: "Query",
+        schema: z.string().optional(),
+      },
+      {
+        name: "sort",
         type: "Query",
         schema: z.string().optional(),
       },
@@ -959,6 +1082,189 @@ const endpoints = makeApi([
   },
   {
     method: "get",
+    path: "/admin/deadletters",
+    alias: "getAdmindeadletters",
+    requestFormat: "json",
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/admin/deadletters/:id",
+    alias: "getAdmindeadlettersId",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/admin/deadletters/:id/payload",
+    alias: "getAdmindeadlettersIdpayload",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "post",
+    path: "/admin/deadletters/:id/retry",
+    alias: "postAdmindeadlettersIdretry",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "post",
+    path: "/admin/deadletters/retry-bulk",
+    alias: "postAdmindeadlettersretryBulk",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "body",
+        type: "Body",
+        schema: z.number().int(),
+      },
+      {
+        name: "eventType",
+        type: "Query",
+        schema: z.string().optional(),
+      },
+      {
+        name: "maxAttemptCount",
+        type: "Query",
+        schema: z.number().int().optional(),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
     path: "/admin/logs",
     alias: "getAdminlogs",
     requestFormat: "json",
@@ -975,6 +1281,98 @@ const endpoints = makeApi([
       },
     ],
     response: AdminAuditLogDtoPagedResultDto,
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/admin/outbox",
+    alias: "getAdminoutbox",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "status",
+        type: "Query",
+        schema: z.string().optional(),
+      },
+      {
+        name: "correlationId",
+        type: "Query",
+        schema: z.string().optional(),
+      },
+      {
+        name: "eventType",
+        type: "Query",
+        schema: z.string().optional(),
+      },
+      {
+        name: "page",
+        type: "Query",
+        schema: z.number().int().optional().default(1),
+      },
+      {
+        name: "pageSize",
+        type: "Query",
+        schema: z.number().int().optional().default(50),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/admin/outbox/summary",
+    alias: "getAdminoutboxsummary",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "windowSeconds",
+        type: "Query",
+        schema: z.number().int().optional().default(60),
+      },
+    ],
+    response: z.void(),
     errors: [
       {
         status: 400,
@@ -1252,6 +1650,11 @@ const endpoints = makeApi([
         name: "Category",
         type: "Query",
         schema: z.string().optional(),
+      },
+      {
+        name: "IncludeChildren",
+        type: "Query",
+        schema: z.boolean().optional(),
       },
       {
         name: "PriceFrom",
@@ -1922,6 +2325,277 @@ const endpoints = makeApi([
       {
         status: 401,
         description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/categories/:id/attributes",
+    alias: "getCategoriesIdattributes",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.array(CategoryAttributeDto),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "post",
+    path: "/categories/:id/attributes",
+    alias: "postCategoriesIdattributes",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "body",
+        type: "Body",
+        schema: UpsertCategoryAttributeDto,
+      },
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: CategoryAttributeDto,
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/categories/:id/filters",
+    alias: "getCategoriesIdfilters",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.array(CategoryAttributeDto),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/categories/:id/view",
+    alias: "getCategoriesIdview",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "id",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: CategoryViewDto,
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/categories/attribute-lookup",
+    alias: "getCategoriesattributeLookup",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "ids",
+        type: "Query",
+        schema: z.string().optional(),
+      },
+      {
+        name: "onlyFilters",
+        type: "Query",
+        schema: z.boolean().optional().default(false),
+      },
+    ],
+    response: z.record(z.array(CategoryAttributeDto)),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "put",
+    path: "/categories/attributes/:attributeId",
+    alias: "putCategoriesattributesAttributeId",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "body",
+        type: "Body",
+        schema: UpsertCategoryAttributeDto,
+      },
+      {
+        name: "attributeId",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: CategoryAttributeDto,
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "delete",
+    path: "/categories/attributes/:attributeId",
+    alias: "deleteCategoriesattributesAttributeId",
+    requestFormat: "json",
+    parameters: [
+      {
+        name: "attributeId",
+        type: "Path",
+        schema: z.number().int(),
+      },
+    ],
+    response: z.void(),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
+        schema: ApiError,
+      },
+      {
+        status: 401,
+        description: `Unauthorized`,
+        schema: ApiError,
+      },
+      {
+        status: 403,
+        description: `Forbidden`,
+        schema: ApiError,
+      },
+      {
+        status: 404,
+        description: `Not Found`,
+        schema: ApiError,
+      },
+    ],
+  },
+  {
+    method: "get",
+    path: "/categories/tree",
+    alias: "getCategoriestree",
+    requestFormat: "json",
+    response: z.array(CategoryTreeDto),
+    errors: [
+      {
+        status: 400,
+        description: `Bad Request`,
         schema: ApiError,
       },
       {

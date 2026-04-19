@@ -6,7 +6,6 @@ import { installAuthFlow } from './utils/authFlow'
 import { configureErrorService } from './services/errorService'
 import { useUserStore } from './stores/userStore'
 import 'bootstrap/dist/css/bootstrap.min.css'
-import 'bootstrap/dist/js/bootstrap.bundle.min.js'
 
 function installFetchTracer() {
 	if (!import.meta.env.DEV) return

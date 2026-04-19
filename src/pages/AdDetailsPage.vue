@@ -13,6 +13,8 @@ import { getModerationStatusClass, getModerationStatusLabel, normalizeModeration
 import { resolveMediaUrl } from '../utils/resolveMediaUrl'
 import { parsePatchIssues } from '../utils/patchResult'
 import { ContractError, mapContractErrorToUi } from '../utils/apiContract'
+import { pushNotification } from '../services/notificationService'
+import { toPublicErrorMessage } from '../services/errorService'
 
 const route = useRoute()
 const router = useRouter()
@@ -145,9 +147,9 @@ async function setModerationStatus(newStatus) {
     try {
       await adsStore.patchModerationStatus(ad.value.id, newStatus)
       showConfirmModal.value = false
-      alert(`Статус объявления обновлён: ${newStatus}`)
+      pushNotification({ type: 'success', message: `Статус объявления обновлён: ${newStatus}` })
     } catch (err) {
-      alert(err?.message || 'Не удалось обновить статус объявления')
+      pushNotification({ type: 'warning', message: toPublicErrorMessage(err, 'Не удалось обновить статус объявления') })
     } finally {
       confirmSending.value = false
     }
@@ -229,7 +231,7 @@ onMounted(async () => {
 async function toggleFavorite() {
   const userId = userStore.user?.userId || userStore.tokenUserId
   if (!userId) {
-    alert('Нужно войти в систему, чтобы использовать избранное')
+    pushNotification({ type: 'warning', message: 'Нужно войти в систему, чтобы использовать избранное' })
     return
   }
 
@@ -245,7 +247,7 @@ async function toggleFavorite() {
     }
   } catch (err) {
     console.error(err)
-    alert(err?.message || 'Не удалось обновить избранное')
+    pushNotification({ type: 'error', message: toPublicErrorMessage(err, 'Не удалось обновить избранное') })
   }
 }
 
@@ -276,7 +278,7 @@ async function writeToSeller() {
     showMessageModal.value = true
   } catch (err) {
     console.error(err)
-    alert('Не удалось открыть чат: ' + (err?.message || 'ошибка'))
+    pushNotification({ type: 'error', message: 'Не удалось открыть чат: ' + toPublicErrorMessage(err, 'ошибка') })
   }
 }
 
@@ -301,14 +303,21 @@ function openRejectModal() {
 
 async function confirmReject() {
   if (!ad.value?.id) return
+  const reason = String(rejectReason.value || '').trim()
+  if (!reason) {
+    pushNotification({ type: 'warning', message: 'Причина отклонения обязательна.' })
+    return
+  }
+
   rejectSending.value = true
   try {
-    await adsStore.patchModerationStatus(ad.value.id, 'rejected', rejectReason.value)
+    console.debug('[AdDetails] confirmReject reason:', reason)
+    await adsStore.patchModerationStatus(ad.value.id, 'rejected', reason)
     showRejectModal.value = false
     rejectReason.value = ''
-    alert('Статус объявления обновлён: rejected')
+    pushNotification({ type: 'success', message: 'Объявление отклонено' })
   } catch (err) {
-    alert(err?.message || 'Не удалось обновить статус объявления')
+    pushNotification({ type: 'warning', message: toPublicErrorMessage(err, 'Не удалось обновить статус объявления') })
   } finally {
     rejectSending.value = false
   }
@@ -325,10 +334,10 @@ async function deleteAd() {
     try {
       await adsStore.deleteAd(route.params.id)
       showConfirmModal.value = false
-      alert('Объявление удалено')
+      pushNotification({ type: 'success', message: 'Объявление удалено' })
       router.push('/')
     } catch (err) {
-      alert(err?.message)
+      pushNotification({ type: 'error', message: toPublicErrorMessage(err) })
       if (err?.status === 404) {
         router.push('/')
       }
@@ -356,7 +365,8 @@ function setCurrentImage(filePath) {
 
 <template>
   <div class="container-fluid px-3 px-lg-4 py-3 py-lg-4">
-    <div class="mx-auto rounded-5 border bg-body-tertiary shadow-lg overflow-hidden" style="max-width: 1520px; min-height: calc(100vh - 90px);">
+    <div class="mx-auto rounded-5 border bg-body-tertiary shadow-lg overflow-hidden" 
+     style="max-width: 1520px; min-height: calc(100dvh - 90px); height: auto;">
       <div v-if="isLoading" class="h-100 d-flex align-items-center justify-content-center py-5">
         <div class="text-center">
           <div class="spinner-border text-primary" role="status">

@@ -23,7 +23,7 @@ function getImageUrl(path) {
 }
 
 const MAX_IMAGES = 10
-const DESCRIPTION_MAX = 5000
+const DESCRIPTION_MAX = 2000
 
 // ---- Формы ----
 const title = ref('')

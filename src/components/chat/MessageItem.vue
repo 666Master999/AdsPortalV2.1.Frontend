@@ -1,4 +1,6 @@
 <script setup>
+import { computed } from 'vue'
+
 const props = defineProps({
   msg: {
     type: Object,
@@ -12,6 +14,14 @@ const props = defineProps({
     type: Boolean,
     default: false,
   },
+  swipeOffset: {
+    type: Number,
+    default: 0,
+  },
+  swipeActive: {
+    type: Boolean,
+    default: false,
+  },
 })
 
 const emit = defineEmits([
@@ -20,9 +30,16 @@ const emit = defineEmits([
   'retry',
   'edit',
   'delete',
+  'reply',
   'media-loaded',
   'media-error',
 ])
+
+const replySwipeIndicatorStyle = computed(() => ({
+  opacity: Math.min(Math.abs(props.swipeOffset) / 68, 1),
+  transform: `translateY(-50%) scale(${props.swipeOffset < -24 ? 1 : 0.92})`,
+  transition: props.swipeActive ? 'none' : 'opacity 180ms ease, transform 180ms ease',
+}))
 
 function openMedia(index) {
   emit('open-media', { message: props.msg, index })
@@ -44,6 +61,10 @@ function deleteMessage() {
   emit('delete', props.msg)
 }
 
+function replyToMessage() {
+  emit('reply', props.msg)
+}
+
 function onMediaLoaded(attachment) {
   emit('media-loaded', { message: props.msg, attachment })
 }
@@ -54,7 +75,13 @@ function onMediaError(attachment) {
 </script>
 
 <template>
-  <div :id="msg.domId" :data-message-id="msg.id" class="d-flex mb-3" :class="msg.isMine ? 'justify-content-end' : 'justify-content-start'">
+  <div :id="msg.domId" :data-message-id="msg.id" class="position-relative mb-3">
+    <div class="position-absolute top-50 end-0 pe-2 small fw-semibold text-primary user-select-none" :style="replySwipeIndicatorStyle">↩ Ответ</div>
+    <div
+      class="d-flex"
+      :class="msg.isMine ? 'justify-content-end' : 'justify-content-start'"
+      :style="{ transform: `translateX(${swipeOffset}px)`, transition: swipeActive ? 'none' : 'transform 180ms ease', touchAction: 'pan-y' }"
+    >
     <div v-if="!msg.isMine" class="rounded-circle flex-shrink-0 me-2 align-self-end overflow-hidden bg-secondary-subtle border d-flex align-items-center justify-content-center text-secondary" style="width: 30px; height: 30px; font-size: 0.75rem; font-weight: 600;">
       <img v-if="msg.authorAvatarUrl" :src="msg.authorAvatarUrl" class="w-100 h-100" style="object-fit: cover;" alt="">
       <span v-else>{{ msg.authorInitial }}</span>
@@ -248,9 +275,11 @@ function onMediaError(attachment) {
       </div>
 
       <div class="d-flex justify-content-end gap-2 mt-1 px-1">
+        <button class="btn btn-link btn-sm p-0 text-primary text-decoration-none" style="font-size: 0.74rem;" type="button" :disabled="actionsDisabled" @click="replyToMessage">Ответить</button>
         <button v-if="msg.canEdit" class="btn btn-link btn-sm p-0 text-secondary text-decoration-none" style="font-size: 0.74rem;" type="button" :disabled="actionsDisabled" @click="editMessage">Изменить</button>
         <button v-if="msg.canDelete" class="btn btn-link btn-sm p-0 text-danger text-decoration-none" style="font-size: 0.74rem;" type="button" :disabled="actionsDisabled" @click="deleteMessage">{{ msg.deleteLabel }}</button>
       </div>
     </div>
+  </div>
   </div>
 </template>

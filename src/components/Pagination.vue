@@ -6,11 +6,25 @@ const props = defineProps({
   totalPages: { type: Number, default: 1 },
   totalCount: { type: Number, default: 0 },
   pageSize: { type: Number, default: 20 },
+  pageSizes: {
+    type: Array,
+    default: () => [10, 20, 50],
+  },
 })
 
 const emit = defineEmits(['changePage', 'changePageSize'])
 
-const PAGE_SIZES = [10, 20, 50]
+const visiblePageSizes = computed(() => {
+  const values = Array.isArray(props.pageSizes)
+    ? props.pageSizes
+      .map(value => Number(value))
+      .filter(value => Number.isInteger(value) && value > 0)
+    : []
+
+  if (!values.length) return [10, 20, 50]
+
+  return Array.from(new Set(values)).sort((left, right) => left - right)
+})
 
 const visiblePages = computed(() => {
   const totalPages = props.totalPages
@@ -40,7 +54,7 @@ const visiblePages = computed(() => {
         :value="pageSize"
         @change="emit('changePageSize', Number($event.target.value))"
       >
-        <option v-for="size in PAGE_SIZES" :key="size" :value="size">{{ size }} / стр.</option>
+        <option v-for="size in visiblePageSizes" :key="size" :value="size">{{ size }} / стр.</option>
       </select>
     </div>
 

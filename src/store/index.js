@@ -1,5 +1,6 @@
 export { useUserStore } from '../stores/userStore'
 export { useAdsStore } from '../stores/adsStore'
+export { useCategoryStore } from '../stores/categoryStore'
 export { useChatStore } from '../stores/chatStore'
 export { useCategoriesStore } from '../stores/categoriesStore'
 export { useLocationsStore } from '../stores/locationsStore'

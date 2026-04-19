@@ -109,8 +109,8 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <div class="d-flex flex-column" style="height: 100dvh;">
-    <Navbar class="flex-shrink-0" />
+  <div class="d-flex flex-column min-vh-100" style="min-height: 100dvh; height: 100dvh;">
+    <Navbar />
     <div v-if="uiNotifications.length" class="px-3 px-lg-4 pt-3">
       <div class="d-grid gap-2">
         <div
@@ -130,8 +130,8 @@ onBeforeUnmount(() => {
         <button type="button" class="btn-close" aria-label="Закрыть" @click="dismissRateLimitNotice"></button>
       </div>
     </div>
-    <div class="flex-grow-1" style="min-height: 0;">
+    <main class="flex-grow-1" style="min-height: 0; overflow: auto;">
       <router-view />
-    </div>
+    </main>
   </div>
 </template>

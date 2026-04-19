@@ -9,13 +9,15 @@
     "preview": "vite preview",
     "swagger:pull": "curl -k https://localhost:7119/swagger/v1/swagger.json -o swagger.json",
     "swagger:types": "openapi-typescript swagger.json -o src/api/types.ts",
-    "swagger:zod": "openapi-zod-client swagger.json -o src/api/zod.ts",
+    "swagger:zod": "node --no-deprecation node_modules/openapi-zod-client/bin.js swagger.json -o src/api/zod.ts",
     "swagger:all": "npm run swagger:pull && npm run swagger:types && npm run swagger:zod"
   },
   "dependencies": {
     "@microsoft/signalr": "^10.0.0",
     "bootstrap": "^5.3.8",
+    "docx": "^9.6.1",
     "pinia": "^3.0.4",
+    "puppeteer": "^24.41.0",
     "sortablejs": "^1.15.7",
     "vue": "^3.5.25",
     "vue-draggable-next": "^2.3.0",

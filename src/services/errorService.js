@@ -1,6 +1,6 @@
 import { pushNotification } from './notificationService'
 import { normalizePatchIssues } from '../utils/patchResult'
-import { isContractError, mapContractErrorToUi } from '../utils/apiContract'
+import { isContractError, mapContractErrorToUi, getUiMessageForContractCode, CONTRACT_ERROR_CODE } from '../utils/apiContract'
 
 export const API_ERROR_CODE = Object.freeze({
   UNAUTHORIZED: 'unauthorized',
@@ -21,7 +21,6 @@ const PUBLIC_ERROR_MESSAGES = Object.freeze({
   [API_ERROR_CODE.FORBIDDEN]: 'Недостаточно прав для выполнения действия.',
   [API_ERROR_CODE.NOT_FOUND]: 'Ресурс недоступен или не найден.',
   [API_ERROR_CODE.RATE_LIMITED]: 'Слишком много запросов. Повторите позже.',
-  [API_ERROR_CODE.VALIDATION_ERROR]: 'Некорректные данные запроса.',
   [API_ERROR_CODE.UNKNOWN]: 'Произошла ошибка. Попробуйте позже.',
 })
 
@@ -90,7 +89,7 @@ function parseRetryAfterSeconds(headers, payload = {}) {
 
 function buildApiError({ code, status, message = '', details = null, issues = [], retryAfterSeconds = null, isLoginBan = false } = {}) {
   const normalizedCode = normalizeErrorCode(code, status)
-  const normalizedMessage = normalizeText(message) || PUBLIC_ERROR_MESSAGES[normalizedCode] || PUBLIC_ERROR_MESSAGES[API_ERROR_CODE.UNKNOWN]
+  const normalizedMessage = normalizeText(message) || ''
 
   return {
     code: normalizedCode,
@@ -122,11 +121,20 @@ export async function extractApiErrorFromResponse(response, fallbackCode = API_E
       payload = { details: text }
     }
   }
-
   const code = payload?.code || payload?.errorCode || payload?.error || fallbackCode
-  const message = payload?.message || ''
+  // Prefer top-level message, fall back to first item in `errors`/`issues` if available
+  let message = payload?.message || ''
   const details = payload?.details ?? null
-  const issues = payload?.issues ?? payload?.fields ?? []
+  const issues = payload?.issues ?? payload?.fields ?? payload?.errors ?? []
+
+  if (!message && Array.isArray(issues) && issues.length) {
+    const first = issues[0]
+    if (first && typeof first === 'object' && typeof first.message === 'string' && first.message.trim()) {
+      message = first.message
+    } else if (typeof first === 'string' && first.trim()) {
+      message = first
+    }
+  }
   const retryAfterSeconds = parseRetryAfterSeconds(response?.headers, payload || {})
   const isLoginBan = isLoginBanText(code) || isLoginBanText(message) || isLoginBanText(details)
 
@@ -150,7 +158,7 @@ export function toApiError(error, fallbackCode = API_ERROR_CODE.UNKNOWN) {
     return {
       code: error.code || fallbackCode,
       status: 0,
-      message: mapContractErrorToUi(error),
+      message: error.message || '',
       details: error.details ?? null,
       issues: [],
       retryAfterSeconds: null,
@@ -191,7 +199,17 @@ export function toApiError(error, fallbackCode = API_ERROR_CODE.UNKNOWN) {
 }
 
 export function toPublicErrorMessage(error, fallbackMessage = PUBLIC_ERROR_MESSAGES[API_ERROR_CODE.UNKNOWN]) {
+  if (isContractError(error)) {
+    return mapContractErrorToUi(error)
+  }
+
   const normalized = toApiError(error)
+
+  if (normalized.code === API_ERROR_CODE.VALIDATION_ERROR) {
+    const fromContract = getUiMessageForContractCode(CONTRACT_ERROR_CODE.INVALID_REQUEST)
+    if (fromContract) return fromContract
+  }
+
   return normalizeText(normalized.message) || fallbackMessage
 }
 
@@ -258,11 +276,17 @@ export async function handleApiError(error, options = {}) {
   }
 
   if (notify && normalized.code !== API_ERROR_CODE.UNAUTHORIZED) {
+    const notificationDetails = (Array.isArray(normalized.issues) && normalized.issues.length)
+      ? normalized.issues
+      : (Array.isArray(normalized.details) && normalized.details.length)
+        ? normalized.details
+        : (normalized.details ? [normalized.details] : null)
+
     pushNotification({
       type: getNotificationType(normalized.code),
       message: normalized.message,
       code: normalized.code,
-      details: normalized.details,
+      details: notificationDetails,
       durationMs: normalized.code === API_ERROR_CODE.RATE_LIMITED ? 5000 : 3500,
     })
   }

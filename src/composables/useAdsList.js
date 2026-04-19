@@ -1,20 +1,17 @@
-import { ref, computed, onUnmounted } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { storeToRefs } from 'pinia'
-import { useAdsStore } from '../stores/adsStore'
-import { normalizeLocationIdList } from './useLocations'
 import { DEFAULT_PAGE, DEFAULT_PAGE_SIZE, MAX_PAGE_SIZE } from '@/constants/pagination'
+import { useAdsStore } from '../stores/adsStore'
+import { useCategoryStore } from '../stores/categoryStore'
+import { useCategoriesStore } from '../stores/categoriesStore'
 
-const DEFAULT_SORT_BY = 'createdAt'
-const DEFAULT_SORT_DIR = 'desc'
-const QUERY_DEBOUNCE_MS = 600
+const DEFAULT_SORT_KEY = ''
+const QUERY_DEBOUNCE_MS = 400
 
-function splitSortKey(sortKey) {
-  const [sortBy, sortDir] = String(sortKey || '').split('-')
-  return {
-    sortBy: sortBy || DEFAULT_SORT_BY,
-    sortDir: sortDir === 'asc' ? 'asc' : DEFAULT_SORT_DIR,
-  }
+function normalizeText(value) {
+  if (value === undefined || value === null) return ''
+  return String(value).trim()
 }
 
 function clampPageSize(value) {
@@ -23,263 +20,476 @@ function clampPageSize(value) {
   return Math.min(parsed, MAX_PAGE_SIZE)
 }
 
-function toNumberOrNull(value) {
-  if (value === '' || value === null || value === undefined) return null
-  const number = Number(value)
-  return Number.isFinite(number) ? number : null
+function normalizePage(value) {
+  const parsed = Number(value)
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_PAGE
 }
 
-function normalizeText(value) {
-  if (value === null || value === undefined) return ''
-  return String(value).trim()
+function normalizeSortKey(value) {
+  return normalizeText(value)
 }
 
-function getRouteCursorValue(cursor) {
-  if (Array.isArray(cursor)) return normalizeText(cursor[0])
-  return normalizeText(cursor)
+function compareFilterSlugs(left, right) {
+  return normalizeText(left?.slug).localeCompare(normalizeText(right?.slug))
 }
 
-function buildSortValue(sortKey) {
-  const { sortBy, sortDir } = splitSortKey(sortKey)
-  const normalizedSortBy = String(sortBy || DEFAULT_SORT_BY).trim().replace(/^-+/, '') || DEFAULT_SORT_BY
-  return sortDir === 'asc' ? normalizedSortBy : `-${normalizedSortBy}`
+function compareCategoryOptions(left, right) {
+  return normalizeText(left?.label).localeCompare(normalizeText(right?.label), undefined, { sensitivity: 'base' })
+}
+
+function createDefaultFilterState(filters = []) {
+  const state = {}
+
+  for (const filter of Array.isArray(filters) ? filters : []) {
+    const slug = normalizeText(filter?.slug)
+    const type = normalizeText(filter?.type).toLowerCase()
+    if (!slug || !type) continue
+
+    if (type === 'enum') {
+      state[slug] = []
+      continue
+    }
+
+    if (type === 'decimal') {
+      state[slug] = { min: '', max: '' }
+      continue
+    }
+
+    if (type === 'bool') {
+      state[slug] = null
+      continue
+    }
+
+    if (type === 'int') {
+      state[slug] = ''
+    }
+  }
+
+  return state
+}
+
+function createDefaultBaseFilterState(includeChildren = false) {
+  return {
+    includeChildren: Boolean(includeChildren),
+    priceFrom: '',
+    priceTo: '',
+    dateFrom: '',
+    dateTo: '',
+  }
+}
+
+function normalizeEnumSelection(value, options = []) {
+  const list = Array.isArray(value) ? value : value == null ? [] : [value]
+  const lookup = new Map()
+
+  for (const option of Array.isArray(options) ? options : []) {
+    const normalizedOption = normalizeText(option)
+    if (!normalizedOption) continue
+    lookup.set(normalizedOption.toLowerCase(), normalizedOption)
+  }
+
+  const result = []
+  const seen = new Set()
+  for (const item of list) {
+    const normalizedItem = normalizeText(item)
+    if (!normalizedItem) continue
+
+    const canonical = lookup.get(normalizedItem.toLowerCase())
+    if (!canonical) continue
+
+    const dedupeKey = canonical.toLowerCase()
+    if (seen.has(dedupeKey)) continue
+    seen.add(dedupeKey)
+    result.push(canonical)
+  }
+
+  result.sort((left, right) => left.localeCompare(right, undefined, { sensitivity: 'base' }))
+
+  return result
+}
+
+function serializeFiltersQuery(filters = [], values = {}) {
+  const query = new URLSearchParams()
+
+  for (const filter of Array.isArray(filters) ? filters : []) {
+    const slug = normalizeText(filter?.slug)
+    const type = normalizeText(filter?.type).toLowerCase()
+    if (!slug || !type) continue
+
+    const currentValue = values?.[slug]
+
+    if (type === 'enum') {
+      const options = Array.isArray(filter?.options)
+        ? filter.options.map(option => normalizeText(option?.value)).filter(Boolean)
+        : []
+      const selected = normalizeEnumSelection(currentValue, options)
+      if (selected.length) {
+        query.set(slug, selected.join(','))
+      }
+      continue
+    }
+
+    if (type === 'int') {
+      const normalizedValue = normalizeText(currentValue)
+      if (normalizedValue) {
+        query.set(slug, normalizedValue)
+      }
+      continue
+    }
+
+    if (type === 'bool') {
+      if (currentValue === null || currentValue === undefined || currentValue === '') continue
+
+      if (typeof currentValue === 'boolean') {
+        query.set(slug, currentValue ? 'true' : 'false')
+        continue
+      }
+
+      const normalizedBool = normalizeText(currentValue).toLowerCase()
+      if (normalizedBool === 'true' || normalizedBool === 'false') {
+        query.set(slug, normalizedBool)
+      }
+      continue
+    }
+
+    if (type === 'decimal') {
+      const rangeValue = currentValue && typeof currentValue === 'object' ? currentValue : null
+      const minValue = normalizeText(rangeValue?.min ?? rangeValue?.from ?? '')
+      const maxValue = normalizeText(rangeValue?.max ?? rangeValue?.to ?? '')
+      const valuesList = [minValue, maxValue].filter(Boolean)
+      if (valuesList.length) {
+        query.set(slug, valuesList.join(','))
+      }
+      continue
+    }
+  }
+
+  return query.toString()
+}
+
+function buildBreadcrumbs(pathIds, categories, currentCategory) {
+  const categoriesById = new Map(
+    Array.isArray(categories)
+      ? categories
+          .map(category => {
+            const id = Number(category?.id)
+            if (!Number.isInteger(id)) return null
+            return [String(id), category]
+          })
+          .filter(Boolean)
+      : []
+  )
+
+  const normalizedPath = Array.isArray(pathIds) ? pathIds.map(item => Number(item)).filter(Number.isInteger) : []
+  return normalizedPath.map((id, index) => {
+    const isCurrent = index === normalizedPath.length - 1
+    const category = isCurrent ? currentCategory : categoriesById.get(String(id))
+    const name = normalizeText(category?.name) || normalizeText(currentCategory?.name) || `#${id}`
+
+    return {
+      id,
+      name,
+      to: isCurrent ? null : `/category/${id}`,
+      active: isCurrent,
+    }
+  })
 }
 
 export function useAdsList() {
-  const adsStore = useAdsStore()
   const route = useRoute()
-  const router = useRouter()
+  const adsStore = useAdsStore()
+  const categoryStore = useCategoryStore()
+  const categoriesStore = useCategoriesStore()
 
-  const { ads: items, isLoading: loading, totalCount, page, pageSize, totalPages } = storeToRefs(adsStore)
+  const { ads: items, isLoading: adsLoading, totalCount, page, pageSize, totalPages, cursor, hasMore } = storeToRefs(adsStore)
+  const { currentCategoryView, filters: categoryFilters, children, path } = storeToRefs(categoryStore)
+  const { categories: categoryList } = storeToRefs(categoriesStore)
 
-  const search = ref('')
-  const category = ref('')
-  const priceFrom = ref('')
-  const priceTo = ref('')
-  const status = ref('')
-  const dateFrom = ref('')
-  const dateTo = ref('')
+  const sortKey = ref(DEFAULT_SORT_KEY)
+  const searchText = ref('')
   const selectedLocationIds = ref([])
-  const cursors = ref([null])
-  const isUsingCursor = ref(false)
-
-  const sortKey = ref(`${DEFAULT_SORT_BY}-${DEFAULT_SORT_DIR}`)
+  const filterState = ref({})
+  const baseFilterState = ref(createDefaultBaseFilterState())
   const error = ref(null)
+  const categoryLoading = ref(false)
+  const isSyncingCategory = ref(false)
+  let categorySyncToken = 0
 
-  let searchTimer = null
+  let filterTimer = null
 
-  function clearSearchTimer() {
-    if (!searchTimer) return
-    clearTimeout(searchTimer)
-    searchTimer = null
+  const canonicalCategoryFilters = computed(() => {
+    const filters = Array.isArray(categoryFilters.value) ? [...categoryFilters.value] : []
+    return filters.sort(compareFilterSlugs)
+  })
+
+  const categoryOptions = computed(() => {
+    const categories = Array.isArray(categoryList.value) ? categoryList.value : []
+    return categories
+      .map(category => {
+        const id = Number(category?.id)
+        const name = normalizeText(category?.name)
+        if (!Number.isInteger(id) || !name) return null
+
+        return {
+          id,
+          name,
+          label: normalizeText(category?.path) || name,
+        }
+      })
+      .filter(Boolean)
+      .sort(compareCategoryOptions)
+  })
+
+  function clearFilterTimer() {
+    if (!filterTimer) return
+    clearTimeout(filterTimer)
+    filterTimer = null
   }
 
-  function buildQueryParams() {
-    const params = {
-      page: page.value,
-      pageSize: pageSize.value,
-      sort: buildSortValue(sortKey.value),
+  onMounted(() => {
+    void categoriesStore.loadCategories().catch(() => null)
+  })
+
+  function syncFilterStateFromSchema() {
+    filterState.value = { ...createDefaultFilterState(canonicalCategoryFilters.value) }
+  }
+
+  function syncBaseFilterStateFromCategory() {
+    baseFilterState.value = {
+      ...createDefaultBaseFilterState(currentCategoryView.value?.category?.isLeaf === false),
     }
-
-    const searchValue = normalizeText(search.value)
-    if (searchValue) params.search = searchValue
-
-    const categoryValue = normalizeText(category.value)
-    if (categoryValue) params.category = categoryValue
-
-    const minPrice = toNumberOrNull(priceFrom.value)
-    const maxPrice = toNumberOrNull(priceTo.value)
-    if (minPrice != null) params.priceFrom = minPrice
-    if (maxPrice != null) params.priceTo = maxPrice
-
-    const fromDate = normalizeText(dateFrom.value)
-    const toDate = normalizeText(dateTo.value)
-    if (fromDate) params.dateFrom = fromDate
-    if (toDate) params.dateTo = toDate
-
-    const statusValue = normalizeText(status.value)
-    if (statusValue) params.status = statusValue
-
-    const locationIds = normalizeLocationIdList(selectedLocationIds.value).slice(0, 10)
-    if (locationIds.length) {
-      params.location = locationIds
-    }
-
-    return params
   }
 
-  async function replaceCursorQuery(cursorValue) {
-    const query = { ...route.query }
-    const normalizedCursor = normalizeText(cursorValue)
-    if (normalizedCursor) query.cursor = normalizedCursor
-    else delete query.cursor
-
-    await router.replace({ query })
-  }
-
-  async function loadOffsetPage(pageNumber) {
+  async function loadPage(pageNumber = DEFAULT_PAGE, cursorValue = null, append = false) {
     error.value = null
-    isUsingCursor.value = false
-    cursors.value = [null]
 
     try {
-      const data = await adsStore.loadAds({ ...buildQueryParams(), page: pageNumber })
-      page.value = pageNumber
-      await replaceCursorQuery(null)
+      const currentBaseFilters = baseFilterState.value && typeof baseFilterState.value === 'object'
+        ? baseFilterState.value
+        : createDefaultBaseFilterState()
+
+      const data = await adsStore.fetchAds({
+        categoryIds: currentCategoryView.value?.category?.id ? [currentCategoryView.value.category.id] : [],
+        includeChildren: currentBaseFilters.includeChildren,
+        search: searchText.value,
+        locationIds: selectedLocationIds.value,
+        priceFrom: currentBaseFilters.priceFrom,
+        priceTo: currentBaseFilters.priceTo,
+        dateFrom: currentBaseFilters.dateFrom,
+        dateTo: currentBaseFilters.dateTo,
+        attributes: serializeFiltersQuery(canonicalCategoryFilters.value, filterState.value),
+        cursor: cursorValue,
+        page: pageNumber,
+        pageSize: pageSize.value,
+        sort: sortKey.value,
+        append,
+      })
+
+      if (data == null) {
+        return null
+      }
+
+      const nextCursorValue = normalizeText(data?.nextCursor ?? data?.NextCursor)
+      hasMore.value = Boolean(data?.hasMore ?? data?.HasMore ?? nextCursorValue)
+
       return data
     } catch (e) {
       error.value = e?.message || 'Ошибка загрузки данных'
+      hasMore.value = false
       return null
     }
   }
 
-  async function refresh() {
+  async function syncCategory(categoryId) {
+    const normalizedCategoryId = normalizeText(categoryId)
+    const syncToken = ++categorySyncToken
+
+    clearFilterTimer()
+    error.value = null
+    categoryLoading.value = true
+    isSyncingCategory.value = true
     page.value = DEFAULT_PAGE
-    await loadOffsetPage(DEFAULT_PAGE)
+    categoryStore.resetCategoryView()
+    filterState.value = {}
+    baseFilterState.value = createDefaultBaseFilterState()
+    searchText.value = ''
+    selectedLocationIds.value = []
+    hasMore.value = false
+    items.value = []
+
+    try {
+      if (normalizedCategoryId) {
+        await categoriesStore.loadCategories().catch(() => null)
+        if (syncToken !== categorySyncToken) return
+        await categoryStore.fetchCategoryView(normalizedCategoryId)
+        if (syncToken !== categorySyncToken) return
+        syncFilterStateFromSchema()
+        syncBaseFilterStateFromCategory()
+      }
+
+      if (!normalizedCategoryId) {
+        syncFilterStateFromSchema()
+        syncBaseFilterStateFromCategory()
+      }
+
+      if (syncToken !== categorySyncToken) return
+      await loadPage(DEFAULT_PAGE, null)
+    } catch (e) {
+      if (syncToken !== categorySyncToken) return
+      error.value = e?.message || 'Ошибка загрузки данных'
+      items.value = []
+    } finally {
+      if (syncToken !== categorySyncToken) return
+      categoryLoading.value = false
+      isSyncingCategory.value = false
+    }
   }
 
-  function applyFilters() {
-    clearSearchTimer()
-    page.value = DEFAULT_PAGE
-    isUsingCursor.value = false
-    cursors.value = [null]
-    adsStore.ads.value = []
-    void refresh()
-  }
+  function scheduleFilterRefresh() {
+    if (isSyncingCategory.value) return
 
-  function onSearchInput() {
-    clearSearchTimer()
-    searchTimer = setTimeout(() => {
-      searchTimer = null
-      page.value = DEFAULT_PAGE
-      void refresh()
+    clearFilterTimer()
+    page.value = DEFAULT_PAGE
+    hasMore.value = false
+    items.value = []
+
+    filterTimer = setTimeout(() => {
+      filterTimer = null
+      void loadPage(DEFAULT_PAGE, null)
     }, QUERY_DEBOUNCE_MS)
   }
 
   async function setPage(newPage) {
-    clearSearchTimer()
-    const parsed = Number(newPage)
-    const pageNumber = Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_PAGE
+    if (isCursorMode.value) return
 
-    if (pageNumber === 1) {
-      await refresh()
-      return
-    }
+    clearFilterTimer()
+    const pageNumber = normalizePage(newPage)
 
-    const step = pageNumber - page.value
-    const nextCursor = cursors.value[1]
+    if (pageNumber === page.value) return
 
-    if (step === 1 && nextCursor !== undefined && nextCursor !== null) {
-      const data = await loadByCursor(nextCursor, pageNumber)
-      if (data) await replaceCursorQuery(nextCursor)
-      return
-    }
-
-    await loadOffsetPage(pageNumber)
+    await loadPage(pageNumber, null)
   }
 
   function setPageSize(newSize) {
-    clearSearchTimer()
-    pageSize.value = clampPageSize(newSize)
+    clearFilterTimer()
+    const nextPageSize = clampPageSize(newSize)
+    if (nextPageSize === pageSize.value) return
+
+    pageSize.value = nextPageSize
     page.value = DEFAULT_PAGE
-    isUsingCursor.value = false
-    cursors.value = [null]
-    void refresh()
+    hasMore.value = false
+    items.value = []
+    void loadPage(DEFAULT_PAGE, null)
   }
 
-  function setSort({ sortBy, sortDir }) {
-    clearSearchTimer()
-    sortKey.value = `${sortBy || DEFAULT_SORT_BY}-${sortDir === 'asc' ? 'asc' : DEFAULT_SORT_DIR}`
+  function setSort(nextSortKey) {
+    clearFilterTimer()
+    const normalizedSortKey = normalizeSortKey(nextSortKey)
+    if (normalizedSortKey === sortKey.value) return
+
+    sortKey.value = normalizedSortKey
     page.value = DEFAULT_PAGE
-    isUsingCursor.value = false
-    cursors.value = [null]
-    void refresh()
+    hasMore.value = false
+    items.value = []
+    void loadPage(DEFAULT_PAGE, null)
+  }
+
+  async function loadNext() {
+    if (isSyncingCategory.value || !hasMore.value || loading.value) return null
+
+    if (isCursorMode.value) {
+      const nextCursor = normalizeText(cursor.value)
+      if (!nextCursor) return null
+      return loadPage(page.value, nextCursor, true)
+    }
+
+    const nextPage = normalizePage(page.value + 1)
+    page.value = nextPage
+    return loadPage(nextPage, null)
+  }
+
+  function applyFilters() {
+    clearFilterTimer()
+    if (isSyncingCategory.value) return Promise.resolve(null)
+
+    page.value = DEFAULT_PAGE
+    hasMore.value = false
+    items.value = []
+    return loadPage(DEFAULT_PAGE, null)
   }
 
   function resetFilters() {
-    clearSearchTimer()
-    search.value = ''
-    category.value = ''
-    priceFrom.value = ''
-    priceTo.value = ''
-    status.value = ''
-    dateFrom.value = ''
-    dateTo.value = ''
+    clearFilterTimer()
+    isSyncingCategory.value = true
+    filterState.value = { ...createDefaultFilterState(canonicalCategoryFilters.value) }
+    searchText.value = ''
     selectedLocationIds.value = []
-    sortKey.value = `${DEFAULT_SORT_BY}-${DEFAULT_SORT_DIR}`
-    page.value = DEFAULT_PAGE
+    baseFilterState.value = {
+      ...createDefaultBaseFilterState(currentCategoryView.value?.category?.isLeaf === false),
+    }
+    sortKey.value = DEFAULT_SORT_KEY
     pageSize.value = DEFAULT_PAGE_SIZE
-    isUsingCursor.value = false
-    cursors.value = [null]
-    adsStore.ads.value = []
-    void refresh()
-  }
-
-  function initWithCategoryId(routeCategoryId) {
-    clearSearchTimer()
-    const id = String(routeCategoryId || '').trim()
-    category.value = id
     page.value = DEFAULT_PAGE
-    isUsingCursor.value = false
-    cursors.value = [null]
-    void refresh()
+    hasMore.value = false
+    items.value = []
+    return loadPage(DEFAULT_PAGE, null).finally(() => {
+      isSyncingCategory.value = false
+    })
   }
 
-  const isPaginationVisible = computed(() => !isUsingCursor.value)
+  const breadcrumbs = computed(() => buildBreadcrumbs(path.value, categoryList.value, currentCategoryView.value?.category))
+  const categoryTitle = computed(() => normalizeText(currentCategoryView.value?.category?.name) || 'Последние объявления')
+  const hasCategoryView = computed(() => Boolean(currentCategoryView.value?.category?.id))
+  const hasCategoryFilters = computed(() => Array.isArray(categoryFilters.value) && categoryFilters.value.length > 0)
+  const loading = computed(() => adsLoading.value || categoryLoading.value)
+  const isCursorMode = computed(() => {
+    const searchValue = normalizeText(searchText.value)
+    const sortValue = normalizeText(sortKey.value)
+    return !searchValue && (!sortValue || sortValue === '-createdAt')
+  })
+  const isInitialLoading = computed(() => loading.value && (!isCursorMode.value || items.value.length === 0))
+  const includeChildren = computed(() => Boolean(baseFilterState.value?.includeChildren))
+  const filters = computed(() => categoryFilters.value)
+  const childrenList = computed(() => children.value)
+  const isPaginationVisible = computed(() => !isCursorMode.value && Number(totalPages.value || 0) > 1)
+  const adsCountLabel = computed(() => {
+    const shown = items.value.length
+    const total = totalCount.value
+    if (total > shown) return `${shown} из ${total} объявлений`
+    if (total < 0) return shown === 0 ? '0 объявлений' : `${shown} объявлений`
+    if (shown === 0) return '0 объявлений'
+    return `${shown} ${shown === 1 ? 'объявление' : shown < 5 ? 'объявления' : 'объявлений'}`
+  })
 
-  async function loadByCursor(cursorValue, pageNumber = page.value) {
-    error.value = null
-    isUsingCursor.value = true
-    try {
-      const data = await adsStore.loadAds({ ...buildQueryParams(), cursor: cursorValue, append: false })
-      page.value = pageNumber
-      cursors.value = data && typeof data === 'object' && data.nextCursor
-        ? [null, data.nextCursor]
-        : [null]
-      return data
-    } catch (e) {
-      error.value = e?.message || 'Ошибка загрузки данных'
-      isUsingCursor.value = false
-      return null
+  watch(
+    () => route.params.id,
+    categoryId => {
+      void syncCategory(categoryId)
+    },
+    { immediate: true }
+  )
+
+  watch(searchText, value => {
+    if (!normalizeText(value) && sortKey.value === '-relevance') {
+      sortKey.value = ''
     }
-  }
+    scheduleFilterRefresh()
+  })
 
-  async function initFromUrl() {
-    category.value = String(route.params.id || '').trim()
-    page.value = DEFAULT_PAGE
-    isUsingCursor.value = false
-    cursors.value = [null]
+  watch(selectedLocationIds, () => {
+    scheduleFilterRefresh()
+  })
 
-    const urlCursor = getRouteCursorValue(route.query.cursor)
-    if (urlCursor) {
-      isUsingCursor.value = true
-      page.value = 2
-      await loadByCursor(urlCursor, 2)
-      return
-    }
+  watch(filterState, () => {
+    scheduleFilterRefresh()
+  })
 
-    await refresh()
-  }
-
-  const visiblePages = computed(() => {
-    const current = page.value
-    const max = totalPages.value ?? current + 2
-    const start = Math.max(1, current - 2)
-    const end = Math.min(max, start + 9)
-    const adjustedStart = Math.max(1, end - 9)
-    return Array.from({ length: end - adjustedStart + 1 }, (_, i) => adjustedStart + i)
+  watch(baseFilterState, () => {
+    scheduleFilterRefresh()
   })
 
   onUnmounted(() => {
-    clearSearchTimer()
-  })
-
-  const adsCountLabel = computed(() => {
-    const shown = adsStore.ads.length
-    const total = adsStore.totalCount
-    if (total > shown) return `${shown} из ${total} объявлений`
-    if (shown === 0) return '0 объявлений'
-    return `${shown} ${shown === 1 ? 'объявление' : shown < 5 ? 'объявления' : 'объявлений'}`
+    clearFilterTimer()
   })
 
   return {
@@ -290,28 +500,30 @@ export function useAdsList() {
     pageSize,
     totalPages,
     totalCount,
-    adsCountLabel,
-    cursors,
-    isUsingCursor,
-    visiblePages,
-    priceFrom,
-    priceTo,
-    category,
-    status,
-    dateFrom,
-    dateTo,
-    selectedLocationIds,
+    hasMore,
     sortKey,
-    search,
+    searchText,
+    selectedLocationIds,
+    filterState,
+    baseFilterState,
+    breadcrumbs,
+    categoryTitle,
+    categoryView: currentCategoryView,
+    filters,
+    categoryOptions,
+    children: childrenList,
+    hasCategoryView,
+    hasCategoryFilters,
+    isInitialLoading,
+    includeChildren,
+    adsCountLabel,
+    isPaginationVisible,
+    isCursorMode,
     setPage,
     setPageSize,
     setSort,
-    resetFilters,
-    onSearchInput,
+    loadNext,
     applyFilters,
-    initWithCategoryId,
-    loadByCursor,
-    initFromUrl,
-    isPaginationVisible,
+    resetFilters,
   }
 }

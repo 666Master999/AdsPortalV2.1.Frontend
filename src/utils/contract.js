@@ -908,6 +908,11 @@ export function mapContractErrorToUi(error) {
   return 'Ошибка данных от сервера'
 }
 
+export function getUiMessageForContractCode(code) {
+  if (!code) return null
+  return CONTRACT_UI_MESSAGE_BY_CODE[code] || null
+}
+
 export function validateAdDetailsDto(value, options = {}) {
   const { strict = true } = options
   return runValidator(value, 'AdDetailsDto', strict, () => {

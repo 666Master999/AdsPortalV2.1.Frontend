@@ -76,12 +76,13 @@ export const notificationRenderers = {
   },
 
   __default(entry) {
+    const fieldErrorsSource = entry?.data?.issues ?? entry?.data?.fieldErrors ?? entry?.data?.details ?? entry?.details ?? []
     return {
       title: 'Уведомление',
       subtitle: toText(entry?.adTitle ?? entry?.preview?.title),
       image: resolveMediaUrl(entry?.mainImagePath ?? entry?.preview?.mainImagePath),
       meta: entry?.type ? `Тип: ${entry.type}` : '',
-      details: [],
+      details: getFieldErrors(fieldErrorsSource),
       actionLabel: '',
       action: null,
       badgeLabel: 'Уведомление',

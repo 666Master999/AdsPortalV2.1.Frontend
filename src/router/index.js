@@ -55,6 +55,14 @@ const routes = [
       requireAnyRole: ['Moderator', 'Admin', 'SuperAdmin'],
     },
   },
+  {
+    path: '/admin/categories',
+    redirect: '/admin?tab=categories',
+    meta: {
+      requiresAuth: true,
+      requireAnyRole: ['Admin', 'SuperAdmin'],
+    },
+  },
 ]
 
 const router = createRouter({

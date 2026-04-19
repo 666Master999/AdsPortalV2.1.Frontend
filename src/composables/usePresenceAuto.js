@@ -1,18 +1,12 @@
 import { onUnmounted, unref, watch } from 'vue'
-import * as presenceModule from '../stores/presenceStore'
-
-const getUsePresenceStore = () => {
-  if (presenceModule && typeof presenceModule.usePresenceStore === 'function') return presenceModule.usePresenceStore
-  if (presenceModule && presenceModule.default && typeof presenceModule.default.usePresenceStore === 'function') return presenceModule.default.usePresenceStore
-  throw new Error("Module '../stores/presenceStore' does not export 'usePresenceStore'.")
-}
+import { usePresenceStore } from '../stores/presenceStore'
 
 function normalizeUserId(userId) {
   return String(userId ?? '').trim()
 }
 
 export function usePresenceAuto(userIdSource) {
-  const presenceStore = getUsePresenceStore()()
+  const presenceStore = usePresenceStore()
   let currentUserId = ''
 
   const stop = watch(

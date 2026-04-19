@@ -7,9 +7,22 @@ import { apiClient } from '../api/apiClient'
 import { validateApiRequestBody } from '../api/requestContract'
 import { validateAdDetailsDto } from '../utils/apiContract'
 import { normalizeModerationStatus } from '@/utils/moderationStatus'
+import { normalizeLocationIdList } from '../composables/useLocations'
 
-const ALLOWED_SORT_FIELDS = new Set(['title', 'price', 'createdAt', 'updatedAt', 'views', 'favorites'])
-const ALLOWED_STATUS_FILTERS = new Set(['active', 'pendingModeration', 'rejected', 'deleted'])
+const RESERVED_QUERY_KEYS = new Set([
+  'search',
+  'location',
+  'category',
+  'includechildren',
+  'pricefrom',
+  'priceto',
+  'datefrom',
+  'dateto',
+  'page',
+  'pagesize',
+  'sort',
+  'cursor',
+])
 
 function clampPageSize(value) {
   const parsed = Number(value)
@@ -27,54 +40,115 @@ function normalizeText(value) {
   return String(value).trim()
 }
 
+function normalizeFiniteNumber(value) {
+  const normalized = normalizeText(value)
+  if (!normalized) return undefined
+
+  const parsed = Number(normalized)
+  return Number.isFinite(parsed) ? parsed : undefined
+}
+
+function normalizeIntegerValue(value) {
+  const parsed = normalizeFiniteNumber(value)
+  return Number.isInteger(parsed) ? parsed : undefined
+}
+
+function normalizeCategoryIdList(value) {
+  if (value === undefined || value === null || value === '') return []
+
+  const source = Array.isArray(value)
+    ? value
+    : String(value)
+        .split(',')
+
+  const normalizedIds = []
+  const seen = new Set()
+
+  for (const item of source) {
+    const parsed = normalizeIntegerValue(item)
+    if (parsed === undefined) continue
+
+    const key = String(parsed)
+    if (seen.has(key)) continue
+
+    seen.add(key)
+    normalizedIds.push(parsed)
+  }
+
+  normalizedIds.sort((left, right) => left - right)
+
+  return normalizedIds
+}
+
+function hashString(value) {
+  let hash = 2166136261
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index)
+    hash = Math.imul(hash, 16777619)
+  }
+
+  return (hash >>> 0).toString(36)
+}
+
 function normalizeNonNegativeInteger(value, fallback = 0) {
   const parsed = Number(value)
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : fallback
 }
 
-function normalizeSortValue(params = {}) {
-  const explicitSort = normalizeText(params.sort)
-  if (explicitSort) {
-    const desc = explicitSort.startsWith('-')
-    const field = explicitSort.replace(/^-+/, '')
-    if (ALLOWED_SORT_FIELDS.has(field)) {
-      return desc ? `-${field}` : field
-    }
-    return '-createdAt'
-  }
-
-  const sortBy = normalizeText(params.sortBy).replace(/^-+/, '') || 'createdAt'
-  const sortDir = normalizeText(params.sortDir).toLowerCase()
-  if (!ALLOWED_SORT_FIELDS.has(sortBy)) return '-createdAt'
-  return sortDir === 'asc' ? sortBy : `-${sortBy}`
-}
-
-function normalizeStatusFilterValue(value) {
-  const normalized = normalizeText(value)
-  if (!normalized) return ''
-
-  const compact = normalized.toLowerCase().replace(/[^a-z0-9а-яё]/g, '')
-  if (compact === 'active') return 'active'
-  if (compact === 'pendingmoderation') return 'pendingModeration'
-  if (compact === 'rejected') return 'rejected'
-  if (compact === 'deleted') return 'deleted'
-
-  return ALLOWED_STATUS_FILTERS.has(normalized) ? normalized : ''
-}
-
 function appendQueryValue(query, key, value) {
   const normalized = normalizeText(value)
   if (!normalized) return
-  query.append(key, normalized)
+  query.set(key, normalized)
 }
 
-function appendQueryValues(query, key, values) {
-  const list = Array.isArray(values) ? values : values == null ? [] : [values]
-  const normalized = list.map(v => normalizeText(v)).filter(Boolean)
-  if (!normalized.length) return
-  // API contract: arrays are CSV e.g. location=1,2,3
-  const capped = key === 'location' ? normalized.slice(0, 10) : normalized
-  query.set(key, capped.join(','))
+function appendNumberValue(query, key, value) {
+  const normalized = normalizeFiniteNumber(value)
+  if (normalized === undefined) return
+  query.set(key, String(normalized))
+}
+
+function appendIntegerValue(query, key, value) {
+  const normalized = normalizeIntegerValue(value)
+  if (normalized === undefined) return
+  query.set(key, String(normalized))
+}
+
+function appendLocationValues(query, value) {
+  const normalizedIds = normalizeLocationIdList(value).slice(0, 10).sort((left, right) => left - right)
+  if (!normalizedIds.length) return
+  query.set('location', normalizedIds.join(','))
+}
+
+function appendCategoryValues(query, value) {
+  const normalizedIds = normalizeCategoryIdList(value)
+  if (!normalizedIds.length) return
+  query.set('category', normalizedIds.join(','))
+}
+
+function toBooleanValue(value) {
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true') return true
+    if (normalized === 'false') return false
+  }
+
+  return null
+}
+
+function appendSerializedFilters(query, filters) {
+  const serialized = normalizeText(filters)
+  if (!serialized) return
+
+  const filterParams = new URLSearchParams(serialized)
+  for (const [key, value] of filterParams.entries()) {
+    const normalizedKey = normalizeText(key)
+    const normalizedValue = normalizeText(value)
+    if (!normalizedKey || !normalizedValue) continue
+    if (RESERVED_QUERY_KEYS.has(normalizedKey.toLowerCase())) continue
+    query.set(normalizedKey, normalizedValue)
+  }
 }
 
 function hasPatchResultShape(data) {
@@ -90,28 +164,30 @@ function hasPatchResultShape(data) {
     )
   )
 }
-
 function buildAdsQueryString(params = {}) {
   const query = new URLSearchParams()
   const hasCursor = params && params.cursor != null && String(params.cursor).trim() !== ''
   if (!hasCursor) query.set('page', String(normalizePage(params.page)))
   query.set('pageSize', String(clampPageSize(params.pageSize)))
 
-  const sortValue = normalizeSortValue(params)
-  if (sortValue) query.set('sort', sortValue)
-
   appendQueryValue(query, 'search', params.search)
-  appendQueryValue(query, 'category', params.category)
-  appendQueryValue(query, 'priceFrom', params.priceFrom)
-  appendQueryValue(query, 'priceTo', params.priceTo)
+  appendLocationValues(query, params.locationIds ?? params.location)
+  appendCategoryValues(query, params.categoryIds ?? params.category)
+
+  const includeChildren = toBooleanValue(params.includeChildren)
+  if (includeChildren === true) {
+    query.set('includeChildren', 'true')
+  }
+
+  appendNumberValue(query, 'priceFrom', params.priceFrom)
+  appendNumberValue(query, 'priceTo', params.priceTo)
   appendQueryValue(query, 'dateFrom', params.dateFrom)
   appendQueryValue(query, 'dateTo', params.dateTo)
-  appendQueryValue(query, 'userId', params.userId)
-  appendQueryValue(query, 'status', normalizeStatusFilterValue(params.status))
-  appendQueryValue(query, 'type', params.type)
-  appendQueryValues(query, 'location', params.location)
 
-  // Cursor-based pagination support: include cursor and avoid page when using cursor
+  appendQueryValue(query, 'sort', params.sort)
+
+  appendSerializedFilters(query, params.attributes ?? params.filters)
+
   if (hasCursor) {
     query.set('cursor', String(params.cursor).trim())
   }
@@ -128,7 +204,9 @@ function extractList(data) {
 
 function normalizeTotalCount(value, fallback = 0) {
   const total = Number(value)
-  return Number.isFinite(total) && total >= 0 ? total : fallback
+  if (!Number.isFinite(total)) return fallback
+  if (total === -1) return -1
+  return total >= 0 ? total : fallback
 }
 
 function toOptionalNumber(value) {
@@ -139,13 +217,14 @@ function toOptionalNumber(value) {
 }
 
 function toOptionalBoolean(value) {
+  if (value === undefined || value === null || value === '') return undefined
   if (typeof value === 'boolean') return value
   if (typeof value === 'string') {
-    const normalized = value.trim().toLowerCase()
-    if (normalized === 'true') return true
-    if (normalized === 'false') return false
+    const parsed = toBooleanValue(value)
+    return parsed === null ? undefined : parsed
   }
-  return Boolean(value)
+
+  return undefined
 }
 
 function normalizeCreateAdPayload(adData = {}) {
@@ -207,6 +286,8 @@ export const useAdsStore = defineStore('ads', () => {
   const page = ref(DEFAULT_PAGE)
   const pageSize = ref(DEFAULT_PAGE_SIZE)
   const totalPages = ref(null)
+  const cursor = ref('')
+  const hasMore = ref(false)
   const isLoading = ref(false)
 
   let _currentRequestId = 0
@@ -214,11 +295,18 @@ export const useAdsStore = defineStore('ads', () => {
   let _currentListPromise = null
   let _currentListKey = ''
 
-  async function loadAds(params = {}) {
+  async function fetchAds(params = {}) {
     const pageValue = normalizePage(params.page)
     const pageSizeValue = clampPageSize(params.pageSize)
-    const queryString = buildAdsQueryString({ ...params, page: pageValue, pageSize: pageSizeValue })
-    const requestKey = queryString
+    const cursorValue = normalizeText(params.cursor)
+    const queryString = buildAdsQueryString({
+      ...params,
+      page: pageValue,
+      pageSize: pageSizeValue,
+      filters: params.filters,
+      cursor: cursorValue,
+    })
+    const requestKey = `${queryString.length}:${hashString(queryString)}`
 
     if (_currentListPromise && requestKey === _currentListKey) {
       return _currentListPromise
@@ -247,7 +335,6 @@ export const useAdsStore = defineStore('ads', () => {
         const { items, total } = extractList(data)
         const mappedItems = mapAdListDtoToViewModel(items)
 
-        const hasCursor = params && params.cursor != null && String(params.cursor).trim() !== ''
         const shouldAppend = Boolean(params && params.append)
 
         if (shouldAppend) {
@@ -256,23 +343,13 @@ export const useAdsStore = defineStore('ads', () => {
           ads.value = mappedItems
         }
 
-        // Only update totalCount when not using cursor-based request
-        if (!hasCursor) {
-          totalCount.value = normalizeTotalCount(data.totalCount ?? data.total ?? total, total)
-        }
-
-        if (!hasCursor) {
-          page.value = normalizePage(data.page ?? data.Page ?? pageValue)
-        }
+        totalCount.value = normalizeTotalCount(data.totalCount ?? data.total ?? total, total)
+        page.value = normalizePage(data.page ?? data.Page ?? pageValue)
         pageSize.value = clampPageSize(data.pageSize ?? data.PageSize ?? pageSizeValue)
-        totalPages.value = hasCursor
-          ? null
-          : normalizeNonNegativeInteger(
-            data.totalPages ?? data.TotalPages,
-            pageSize.value > 0 ? Math.ceil((totalCount.value || 0) / pageSize.value) : 0
-          )
+        totalPages.value = normalizeNonNegativeInteger(data.totalPages ?? data.TotalPages)
+        cursor.value = normalizeText(data.nextCursor ?? data.NextCursor) || ''
+        hasMore.value = Boolean(data.hasMore ?? data.HasMore ?? cursor.value)
 
-        // Return raw data so callers can access cursor/nextCursor
         return data
       } catch (error) {
         if (requestId !== _currentRequestId || error?.name === 'AbortError') return
@@ -281,6 +358,8 @@ export const useAdsStore = defineStore('ads', () => {
         page.value = pageValue
         pageSize.value = pageSizeValue
         totalPages.value = 0
+        cursor.value = ''
+        hasMore.value = false
         throw error
       } finally {
         if (_currentListController === controller) {
@@ -381,8 +460,12 @@ export const useAdsStore = defineStore('ads', () => {
     return data
   }
 
-  async function patchModerationStatus(adId, moderationStatus) {
-    const payload = {status: normalizeModerationStatus(moderationStatus)}
+  async function patchModerationStatus(adId, moderationStatus, reason) {
+    const payload = {
+      status: normalizeModerationStatus(moderationStatus),
+      reason: reason == null ? undefined : String(reason).trim(),
+    }
+    console.debug('[adsStore] patchModerationStatus payload:', payload)
     validateApiRequestBody('patch', `/ads/${adId}/moderation`, payload)
 
     const data = await apiClient.patch(`/ads/${adId}/moderation`, payload, {
@@ -459,8 +542,10 @@ export const useAdsStore = defineStore('ads', () => {
     page,
     pageSize,
     totalPages,
+    cursor,
+    hasMore,
     isLoading,
-    loadAds,
+    fetchAds,
     loadAd,
     createAd,
     createAdWithImages,

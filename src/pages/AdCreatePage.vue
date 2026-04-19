@@ -15,7 +15,7 @@
 
     const URL = window.URL || globalThis.URL
     const MAX_IMAGES = 10
-    const DESCRIPTION_MAX = 5000
+    const DESCRIPTION_MAX = 2000
 
     const title = ref('')
     const description = ref('')
